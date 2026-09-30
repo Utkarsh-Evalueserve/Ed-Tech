@@ -1,0 +1,147 @@
+"""
+Parallel.ai API client wrapper.
+
+Uses the official `parallel-web` SDK (Parallel Search API). Wraps every call
+with:
+  - a bounded semaphore for concurrency control,
+  - exponential backoff with jitter on rate limits/transient errors,
+  - failed-query logging so a query that still fails after all retries is
+    recorded (never silently dropped) and can be retried again at the end
+    of the run.
+
+NOTE: exact endpoint paths/response fields are provided by the SDK, which
+insulates this integration from documentation changes. If you swap in a
+different Parallel API surface, only this file needs to change.
+"""
+from __future__ import annotations
+
+import random
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import List, Optional
+
+try:
+    from parallel import Parallel
+except ImportError:  # pragma: no cover - surfaced clearly at runtime instead
+    Parallel = None
+
+
+@dataclass
+class RawResult:
+    url: str
+    title: str
+    excerpt: str
+    source_domain: str
+    published_date: Optional[str] = None
+
+
+@dataclass
+class FailedQuery:
+    company_name: str
+    lane: str
+    geography: Optional[str]
+    objective: str
+    error: str
+
+
+class ParallelClient:
+    def __init__(
+        self,
+        api_key: str,
+        max_concurrent: int = 5,
+        max_retries: int = 4,
+        backoff_base: float = 2.0,
+        mode: str = "advanced",
+        max_results: int = 10,
+    ):
+        if Parallel is None:
+            raise RuntimeError(
+                "The 'parallel-web' package is not installed. Run: pip install -r requirements.txt"
+            )
+        # max_retries=0: we own the retry/backoff policy ourselves (below),
+        # including logging failures for an end-of-run retry pass -- letting
+        # the SDK retry internally too would just stack redundant delays.
+        self._client = Parallel(api_key=api_key, max_retries=0)
+        self._sem = threading.Semaphore(max_concurrent)
+        self.max_retries = max_retries
+        self.backoff_base = backoff_base
+        self.mode = mode
+        self.max_results = max_results
+        self.failed_queries: List[FailedQuery] = []
+        self._lock = threading.Lock()
+
+    def search(
+        self,
+        objective: str,
+        queries: List[str],
+        company_name: str,
+        lane: str,
+        geography: Optional[str] = None,
+    ) -> List[RawResult]:
+        """Run one search task with retry/backoff. Never raises; on final
+        failure it records the failure and returns an empty list so the run
+        continues and nothing silently blocks the rest of the batch."""
+        last_error = "unknown error"
+        with self._sem:
+            for attempt in range(self.max_retries + 1):
+                try:
+                    resp = self._client.search(
+                        objective=objective,
+                        search_queries=queries,
+                        mode=self.mode,
+                        advanced_settings={"max_results": self.max_results},
+                    )
+                    return self._parse_response(resp)
+                except Exception as exc:  # noqa: BLE001 - broad on purpose, retried below
+                    last_error = str(exc)
+                    is_rate_limit = "429" in last_error or "rate limit" in last_error.lower()
+                    if attempt < self.max_retries:
+                        delay = self.backoff_base * (2**attempt) + random.uniform(0, 1)
+                        if is_rate_limit:
+                            delay *= 1.5
+                        time.sleep(delay)
+                        continue
+
+        with self._lock:
+            self.failed_queries.append(
+                FailedQuery(company_name, lane, geography, objective, last_error)
+            )
+        return []
+
+    def retry_failed(self) -> List[FailedQuery]:
+        """Retry every currently-failed query once more (end-of-run pass).
+        Returns the list of queries still failing after this pass."""
+        pending = self.failed_queries
+        self.failed_queries = []
+        still_failed: List[FailedQuery] = []
+        for fq in pending:
+            results = self.search(fq.objective, [fq.objective], fq.company_name, fq.lane, fq.geography)
+            if not results and self.failed_queries:
+                still_failed.extend(self.failed_queries)
+                self.failed_queries = []
+        return still_failed
+
+    @staticmethod
+    def _parse_response(resp) -> List[RawResult]:
+        """Normalize SDK response objects/dicts into RawResult, tolerating
+        minor shape differences across SDK versions."""
+        results = getattr(resp, "results", None)
+        if results is None and isinstance(resp, dict):
+            results = resp.get("results", [])
+        results = results or []
+
+        parsed: List[RawResult] = []
+        for r in results:
+            get = (lambda k, default=None: getattr(r, k, default)) if not isinstance(r, dict) else r.get
+            url = get("url") or ""
+            title = get("title") or ""
+            excerpts = get("excerpts") or get("excerpt") or get("content") or []
+            if isinstance(excerpts, list):
+                excerpt = " ".join(str(e) for e in excerpts)
+            else:
+                excerpt = str(excerpts)
+            domain = url.replace("https://", "").replace("http://", "").split("/")[0] if url else ""
+            published = get("publish_date") or get("published_date") or get("date")
+            parsed.append(RawResult(url=url, title=title, excerpt=excerpt, source_domain=domain, published_date=published))
+        return parsed
