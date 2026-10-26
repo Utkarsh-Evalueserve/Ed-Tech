@@ -19,16 +19,26 @@ _EXCLUDE_RE = re.compile("|".join(EXCLUDE_PATTERNS), re.IGNORECASE)
 
 _CATEGORY_KEYWORDS = {
     "Executive & Leadership Changes": ["ceo", "cfo", "coo", "appoint", "steps down", "resign", "named president", "new chief", "hires", "promoted"],
-    "Strategic Moves (M&A, Partnerships, Investments, Funding)": ["acquisition", "acquire", "merger", "partnership", "invest", "funding", "raises", "series a", "series b", "series c", "stake"],
+    "Strategic Moves (M&A, Partnerships, Investments, Funding)": ["acquisition", "acquire", "merger", "partnership", "invest", "funding", "raises", "series a", "series b", "series c", "stake", "collaborat", "mou", "memorandum of understanding", "signs agreement", "pilot program"],
     "Office Openings/Expansions": ["opens office", "expansion", "new office", "expands to", "opens new"],
     "New Products/Launches": ["launch", "unveils", "introduces", "new product", "rolls out", "release of"],
-    "Marketing Campaigns": ["campaign", "marketing", "brand partnership", "sponsorship"],
+    "Marketing Campaigns": ["campaign", "marketing", "brand partnership", "sponsorship", "conference", "summit", "seminar", "conclave", "workshop", "keynote"],
     "Market Entry/Exit": ["enters market", "market entry", "exits", "withdraws from", "shuts down operations"],
-    "Government/Regulatory Developments": ["regulation", "regulatory", "government", "ministry", "policy", "compliance", "approval from"],
-    "Awards": ["award", "wins", "recognized", "honored", "named best"],
+    "Government/Regulatory Developments": ["regulation", "regulatory", "government", "ministry", "policy", "compliance", "approval from", "accreditation", "accredited", "certification", "certified by"],
+    "Awards": ["award", "wins", "recognized", "honored", "named best", "named a luminary", "ranked among"],
     "Layoffs & Restructuring": ["layoff", "layoffs", "restructuring", "job cuts", "workforce reduction"],
     "Financial Results": ["quarterly results", "annual report", "revenue", "earnings", "financial results"],
-    "Negative News (Lawsuits, Controversies, Data Breaches, Regulatory Action, Complaints)": ["lawsuit", "sues", "data breach", "controversy", "complaint", "fined", "investigation", "scandal"],
+    "Negative News (Lawsuits, Controversies, Data Breaches, Regulatory Action, Complaints)": ["lawsuit", "sues", "data breach", "controversy", "complaint", "fined", "investigation", "scandal", "outage", "disruption", "service issue"],
+}
+
+# Phrases that make a keyword match misleading for its category -- e.g. a
+# government "launches a tender" is a procurement notice, not a product
+# launch, even though it hits the New Products/Launches keyword "launch".
+_CATEGORY_FALSE_FRIEND_PATTERNS = {
+    "New Products/Launches": [r"launches? (a |an )?(tender|rfp|request for proposal)", r"invites bids"],
+}
+_CATEGORY_FALSE_FRIEND_RE = {
+    cat: re.compile("|".join(pats), re.IGNORECASE) for cat, pats in _CATEGORY_FALSE_FRIEND_PATTERNS.items()
 }
 
 _INDUSTRY_CONTEXT = [
@@ -46,7 +56,7 @@ _GENERIC_PAGE_DOMAINS = [
 ]
 _GENERIC_PAGE_URL_PATTERNS = [
     r"/about(-us)?/?$", r"/company/?$", r"/overview/?$", r"/profile/?$",
-    r"/wiki/", r"/directory/",
+    r"/wiki/", r"/directory/", r"/author/",
 ]
 _GENERIC_TITLE_PATTERNS = [
     r"^about\s", r"\boverview\b", r"\bcompany profile\b", r"\| linkedin\b",
@@ -59,6 +69,7 @@ _GENERIC_TITLE_PATTERNS = [
 ]
 _GENERIC_PAGE_URL_RE = re.compile("|".join(_GENERIC_PAGE_URL_PATTERNS), re.IGNORECASE)
 _GENERIC_TITLE_RE = re.compile("|".join(_GENERIC_TITLE_PATTERNS), re.IGNORECASE)
+_ROOT_PATH_RE = re.compile(r"^https?://[^/]+/?$")  # just a domain, no path at all: a homepage
 
 
 @dataclass
@@ -85,16 +96,48 @@ def is_excluded_noise(text: str, matched_category: Optional[str]) -> bool:
     return bool(_EXCLUDE_RE.search(text))
 
 
-def is_generic_page(url: str, title: str, source_domain: str) -> bool:
+def is_generic_page(url: str, title: str, source_domain: str, company: Optional[Company] = None) -> bool:
     """True for reference/profile/directory pages (LinkedIn, Wikipedia,
     Crunchbase, an 'About Us' page, etc.) that are not news articles -- the
     main source of 'general company pages' noise in broad searches."""
+    url = url or ""
+    title = title or ""
+
     if any(d in source_domain for d in _GENERIC_PAGE_DOMAINS):
         return True
-    if _GENERIC_PAGE_URL_RE.search(url or ""):
+    if _GENERIC_PAGE_URL_RE.search(url):
         return True
-    if _GENERIC_TITLE_RE.search(title or ""):
+    if _GENERIC_TITLE_RE.search(title):
         return True
+    if _ROOT_PATH_RE.match(url):
+        return True  # bare homepage URL, not a specific article
+
+    # A URL with only 1-2 short path segments and no long descriptive slug
+    # (real article URLs almost always carry one, e.g. "-cambium-learning-
+    # group-ceo-named-...") OR a numeric article ID (e.g. government/wire
+    # sites that use "/en/61550/" instead of a text slug) is usually a
+    # section/tag/topic listing page, not a single story (e.g.
+    # cam.ac.uk/news/technology).
+    path = re.sub(r"^https?://[^/]+", "", url).rstrip("/")
+    segments = [s for s in path.split("/") if s]
+    looks_like_specific_item = any(
+        (len(s) >= 15 and "-" in s) or (s.isdigit() and len(s) >= 3) for s in segments
+    )
+    if segments and len(segments) <= 2 and not looks_like_specific_item:
+        return True
+
+    if company is not None:
+        names = [n.lower() for n in company.all_names()]
+        title_lower = title.lower().strip()
+        # A title that's just the bare company name (a blog/author index
+        # card) or that opens with "<Company> |" (a directory/member-profile
+        # entry, e.g. "University of Babylon | Higher Education and
+        # research for...") reads as a listing, not a news headline.
+        if title_lower in names:
+            return True
+        if any(title_lower.startswith(n + " |") or title_lower.startswith(n + "|") for n in names):
+            return True
+
     return False
 
 
@@ -109,10 +152,31 @@ def company_mentioned_prominently(company: Company, headline: str, excerpt: str)
     return any(n in lead for n in names)
 
 
+def mention_count(names: List[str], text: str) -> int:
+    lower = (text or "").lower()
+    return sum(lower.count(n.lower()) for n in names if n)
+
+
+def is_prominent_in_full_text(company_name: str, headline: str, full_text: str) -> bool:
+    """Stricter re-check run on the FULL article (after extraction), not
+    just the short search excerpt -- catches cases where a short excerpt
+    happened to show the name near the top, but the actual article is about
+    something else and only mentions the company once in passing (the
+    excerpt-only check can't see that; the full text can)."""
+    name = (company_name or "").lower()
+    if not name:
+        return True
+    if name in (headline or "").lower():
+        return True
+    return mention_count([company_name], full_text) >= 2
+
+
 def classify_category(text: str) -> Optional[str]:
     lower = text.lower()
     best_cat, best_hits = None, 0
     for cat in CATEGORIES:
+        if cat in _CATEGORY_FALSE_FRIEND_RE and _CATEGORY_FALSE_FRIEND_RE[cat].search(lower):
+            continue  # e.g. a procurement "launches a tender" isn't a product launch
         hits = sum(1 for kw in _CATEGORY_KEYWORDS[cat] if kw in lower)
         if hits > best_hits:
             best_cat, best_hits = cat, hits

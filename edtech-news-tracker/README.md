@@ -47,7 +47,12 @@ Open `edtech_tracking_list.xlsx`. It has two tabs:
     accurate.
   - Filling in `Official Website` and `HQ Country` is optional but strongly
     recommended: it helps the tool tell apart companies that share a common
-    name from unrelated businesses.
+    name from unrelated businesses. This matters most for short/generic
+    names -- real feedback on actual runs showed exactly this: "Apollo",
+    "Avant", "ETS" and "Edwin" each pulled in news about an unrelated
+    same-named company/product, and all four have a blank `Official
+    Website` today. Adding the real domain for a company like that is the
+    single highest-impact fix you can make without touching any code.
 - **Geographies**: `Country`, `Primary Language(s)`, `Local News Sources`
   - `Primary Language(s)` is pre-filled with a sensible default per country
     -- edit it if a market needs an additional language.
@@ -82,15 +87,17 @@ End date   [Enter = now]:       2026-09-30
 Press Enter on both (leave them blank) to default to the last 24 hours --
 this is what you'd normally use for the daily run.
 
-A progress bar will show companies being processed. Each company runs 2
-focused searches (its own newsroom/press-wire coverage, and a broader
-local/regional search); after irrelevant results and duplicates are removed,
-there's one more pass that fetches the full text of each surviving article to
-build its 400-500 word summary. A full run across all 280 companies is
-typically **under an hour** for a 1-day window. Raise
-`MAX_CONCURRENT_REQUESTS` in `.env` if you want it faster and your Parallel.ai
-plan's rate limit allows it; switch `PARALLEL_MODE` to `advanced` if you'd
-rather trade some speed for deeper recall.
+A progress bar will show companies being processed. Each company runs 3
+focused searches (its own newsroom/press-wire coverage, a broader
+local/regional search, and an events/partnerships/awards search added after
+reviewing real missed-article feedback); after irrelevant results and
+duplicates are removed, there's one more pass that fetches the full text of
+each surviving article to build its 400-500 word summary. A full run across
+all 280 companies is still expected to be well **under an hour** for a
+1-day window (a real test of the earlier 2-search design completed in about
+2 minutes, so there's a lot of headroom even with the added 3rd search and
+richer settings). Lower `PARALLEL_MODE` to `basic` or `MAX_RESULTS_PER_QUERY`
+in `.env` if a run ever gets too slow for your Parallel.ai plan.
 
 ### If it gets interrupted
 Just run `python edtech_news_tracker.py` again with the **same date range**.
@@ -132,11 +139,13 @@ automatically if you want it fully hands-off.
 The code is split into small, single-purpose modules under `tracker/`:
 - `config.py` -- settings, API key loading, category list.
 - `excel_loader.py` -- reads and validates `edtech_tracking_list.xlsx`.
-- `query_builder.py` -- builds 2 focused searches per company: one for its
-  own newsroom/press-wire coverage, and one broader local/regional search
-  that lets Parallel's multilingual index surface local-language coverage
-  (geography is attributed afterward by matching the tracked country names,
-  rather than issuing a separate call per country).
+- `query_builder.py` -- builds 3 focused searches per company: its own
+  newsroom/press-wire coverage, a broader local/regional search that lets
+  Parallel's multilingual index surface local-language coverage (geography
+  is attributed afterward by matching the tracked country names, rather
+  than issuing a separate call per country), and an events/partnerships/
+  awards search targeting the smaller local stories a generic company-news
+  query tends to miss in favor of big funding/M&A headlines.
 - `parallel_client.py` -- talks to the Parallel.ai Search and Extract APIs,
   with retry/backoff and a concurrency limit; failed queries are logged and
   retried once more at the end of the run.

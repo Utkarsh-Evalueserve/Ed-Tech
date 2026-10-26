@@ -33,9 +33,9 @@ from tracker.parallel_client import ParallelClient, RawResult
 from tracker.query_builder import SearchTask, build_tasks_for_company
 from tracker.relevance import (
     Article, classify_category, company_mentioned_prominently, detect_geography,
-    is_excluded_noise, is_generic_page, score_relevance,
+    is_excluded_noise, is_generic_page, is_prominent_in_full_text, score_relevance,
 )
-from tracker.summarizer import summarize
+from tracker.summarizer import clean_short_summary, summarize
 from tracker.translator import translate_to_english
 
 DATE_FMT = "%Y-%m-%d"
@@ -163,7 +163,7 @@ def _raw_result_to_article(
         # company itself (or the wire) is the authority on it being current.
         return None
 
-    if is_generic_page(result.url, result.title, result.source_domain):
+    if is_generic_page(result.url, result.title, result.source_domain, task.company):
         return None  # LinkedIn/Wikipedia/Crunchbase/"About Us"-style pages, not news
 
     headline_en, headline_ok = translate_to_english(result.title)
@@ -286,6 +286,10 @@ def enrich_with_full_summaries(
             for url, full_content in content_map.items():
                 for art in url_to_articles.get(url, []):
                     if not full_content or not full_content.strip():
+                        # Full-text extraction failed -- at least clean the
+                        # short fallback excerpt of any nav/boilerplate junk
+                        # it may carry, rather than leaving it raw.
+                        art.summary_en = clean_short_summary(art.summary_en)
                         art.review_flag = _append_flag(art.review_flag, "Full article unavailable - short summary only")
                         continue
 
@@ -304,12 +308,22 @@ def enrich_with_full_summaries(
                     translated, translate_ok = translate_to_english(full_content)
                     if not translate_ok:
                         art.review_flag = _append_flag(art.review_flag, "Translation uncertain")
+
+                    # A short excerpt can misleadingly show the company name
+                    # near the top while the full article is actually about
+                    # something else (seen in practice: a passing mention in
+                    # an unrelated local-news digest). Re-check against the
+                    # full text before trusting it enough to summarize.
+                    if not is_prominent_in_full_text(art.company, art.headline_en, translated):
+                        to_drop.add(id(art))
+                        continue
+
                     art.summary_en = summarize(
                         translated, focus_terms=[art.company], target_words=450, max_words=500
                     )
 
     if to_drop:
-        print(f"  Dropped {len(to_drop)} article(s) that turned out to be older than the reporting window.")
+        print(f"  Dropped {len(to_drop)} article(s) that turned out to be stale or not actually about the company.")
     return [a for a in articles if id(a) not in to_drop]
 
 

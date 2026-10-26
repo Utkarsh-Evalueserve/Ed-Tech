@@ -97,6 +97,13 @@ def _words(sentence: str) -> List[str]:
     return _WORD_RE.findall(sentence.lower())
 
 
+def clean_short_summary(text: str) -> str:
+    """Public wrapper for stripping nav/boilerplate junk out of a short
+    fallback summary (built from a search excerpt, not a full extraction) --
+    the same junk patterns can leak into excerpts too, not just full pages."""
+    return _clean_full_text(text)
+
+
 def summarize(
     text: str,
     focus_terms: Optional[List[str]] = None,
