@@ -55,20 +55,36 @@ def _domain(url: str) -> str:
     return url.split("/")[0]
 
 
-def build_official_press_task(company: Company) -> SearchTask:
+def _date_window_clause(start_date: str, end_date: str) -> str:
+    if start_date == end_date:
+        return (
+            f"The article MUST be published on {start_date}. Do not include older press "
+            f"releases or articles, even ones still indexed, cached, or re-shared today -- "
+            f"check the actual original publish date, not just whether the page currently "
+            f"appears in search results. State the publish date explicitly when you find it."
+        )
+    return (
+        f"The article MUST be published between {start_date} and {end_date} (inclusive). "
+        f"Do not include older press releases or articles, even ones still indexed, cached, "
+        f"or re-shared within this window -- check the actual original publish date. State "
+        f"the publish date explicitly when you find it."
+    )
+
+
+def build_official_press_task(company: Company, start_date: str, end_date: str) -> SearchTask:
     site_hint = f" site:{_domain(company.website)}" if company.website else ""
     wire_sites = " OR ".join(f"site:{d}" for d in PRESS_WIRE_DOMAINS)
     aliases_txt = ", ".join(company.aliases) if company.aliases else "no aliases"
 
     objective = (
-        f"Find recent news specifically ABOUT the education/ed-tech company '{company.name}' "
+        f"Find news specifically ABOUT the education/ed-tech company '{company.name}' "
         f"(also known as: {aliases_txt}) -- not pages that merely mention the name in passing. "
         f"Only count: press releases or news posted on {company.name}'s own newsroom/press/blog/"
         f"investor-relations pages, OR press releases about {company.name} distributed via "
         f"major wire services (PR Newswire, Business Wire, GlobeNewswire, Cision, Accesswire). "
         f"Topics of interest: {', '.join(CATEGORIES)}. "
         f"Exclude: generic company profile/about/overview pages, directory listings, and routine "
-        f"stock price or analyst rating commentary."
+        f"stock price or analyst rating commentary. {_date_window_clause(start_date, end_date)}"
     )
     queries = [
         f"{company.name} newsroom press release{site_hint}",
@@ -78,19 +94,22 @@ def build_official_press_task(company: Company) -> SearchTask:
     return SearchTask(company, "official_press", objective, queries)
 
 
-def build_local_regional_task(company: Company, geographies: List[Geography]) -> SearchTask:
+def build_local_regional_task(
+    company: Company, geographies: List[Geography], start_date: str, end_date: str
+) -> SearchTask:
     countries = ", ".join(g.country for g in geographies) if geographies else "any country"
     aliases_txt = ", ".join(company.aliases) if company.aliases else "no aliases"
 
     objective = (
-        f"Find recent local or regional news coverage, in any local language, that is "
+        f"Find local or regional news coverage, in any local language, that is "
         f"SPECIFICALLY ABOUT the education/ed-tech company '{company.name}' (also known as: "
         f"{aliases_txt}) -- for example a local office opening, a market entry, a partnership "
         f"with a local institution, a regulatory action, or local press coverage of the company. "
         f"Only consider articles where this company is the actual subject of the story, not "
         f"pages that just mention its name alongside many others. Restrict to these tracked "
         f"countries: {countries}. Topics of interest: {', '.join(CATEGORIES)}. "
-        f"Exclude: generic company profile/directory pages and routine stock/analyst commentary."
+        f"Exclude: generic company profile/directory pages and routine stock/analyst commentary. "
+        f"{_date_window_clause(start_date, end_date)}"
     )
     queries = [
         f'"{company.name}" news',
@@ -100,19 +119,22 @@ def build_local_regional_task(company: Company, geographies: List[Geography]) ->
     return SearchTask(company, "local_regional", objective, queries)
 
 
-def build_events_partnerships_task(company: Company, geographies: List[Geography]) -> SearchTask:
+def build_events_partnerships_task(
+    company: Company, geographies: List[Geography], start_date: str, end_date: str
+) -> SearchTask:
     countries = ", ".join(g.country for g in geographies) if geographies else "any country"
     aliases_txt = ", ".join(company.aliases) if company.aliases else "no aliases"
 
     objective = (
-        f"Find recent news about the education/ed-tech company '{company.name}' (also known as: "
+        f"Find news about the education/ed-tech company '{company.name}' (also known as: "
         f"{aliases_txt}) attending or hosting a conference/summit/seminar, signing a cooperation "
         f"or accreditation agreement with a school/university/ministry, receiving an industry "
         f"award or analyst recognition, or announcing a smaller local collaboration -- the kind "
         f"of local/regional coverage that a generic company-news search tends to miss in favor of "
         f"big funding/M&A headlines. Restrict to these tracked countries: {countries}. Only count "
         f"articles where {company.name} is the actual subject, not a passing mention. Exclude "
-        f"generic company profile/directory pages and routine stock/analyst commentary."
+        f"generic company profile/directory pages and routine stock/analyst commentary. "
+        f"{_date_window_clause(start_date, end_date)}"
     )
     queries = [
         f"{company.name} conference OR summit OR seminar OR conclave",
@@ -122,9 +144,11 @@ def build_events_partnerships_task(company: Company, geographies: List[Geography
     return SearchTask(company, "events_partnerships", objective, queries)
 
 
-def build_tasks_for_company(company: Company, geographies: List[Geography]) -> List[SearchTask]:
+def build_tasks_for_company(
+    company: Company, geographies: List[Geography], start_date: str, end_date: str
+) -> List[SearchTask]:
     return [
-        build_official_press_task(company),
-        build_local_regional_task(company, geographies),
-        build_events_partnerships_task(company, geographies),
+        build_official_press_task(company, start_date, end_date),
+        build_local_regional_task(company, geographies, start_date, end_date),
+        build_events_partnerships_task(company, geographies, start_date, end_date),
     ]

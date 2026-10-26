@@ -23,7 +23,7 @@ from dateutil import parser as dateparser
 from tqdm import tqdm
 
 from tracker import checkpoint
-from tracker.config import load_settings, Settings, PRESS_WIRE_DOMAINS
+from tracker.config import load_settings, Settings
 from tracker.dedup import deduplicate
 from tracker.excel_loader import (
     Company, Geography, TrackingListError, load_tracking_list,
@@ -39,7 +39,6 @@ from tracker.summarizer import clean_short_summary, summarize
 from tracker.translator import translate_to_english
 
 DATE_FMT = "%Y-%m-%d"
-_PRESS_WIRE_DOMAINS_SET = set(PRESS_WIRE_DOMAINS)
 
 
 # ---------------------------------------------------------------------------
@@ -108,13 +107,38 @@ def _sniff_date(text: str | None) -> datetime | None:
         return None
 
 
+# BusinessWire's URL scheme embeds the exact release date right in the path
+# (".../news/home/YYYYMMDDnnnnnn/en/..."), confirmed against real stale
+# rows from actual runs (dates found this way ranged from 2021 to 2026, all
+# correctly years/months old) -- this is a 100% reliable source of truth
+# when present, used ahead of fuzzier text-sniffing.
+_BUSINESSWIRE_URL_DATE_RE = re.compile(r"/news/home/(\d{4})(\d{2})(\d{2})\d*/")
+
+
+def _date_from_url(url: str | None) -> datetime | None:
+    if not url:
+        return None
+    m = _BUSINESSWIRE_URL_DATE_RE.search(url)
+    if not m:
+        return None
+    try:
+        return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
+
+
 def _within_window(
-    published_raw: str | None, start_dt: datetime, end_dt: datetime, fallback_text: str | None = None
+    published_raw: str | None,
+    start_dt: datetime,
+    end_dt: datetime,
+    fallback_text: str | None = None,
+    url: str | None = None,
 ) -> tuple[bool, bool]:
     """Returns (within_window, date_was_determined). Tries the structured
-    publish-date field first, then falls back to sniffing an explicit date
-    out of `fallback_text` (title/excerpt) -- this catches cases where the
-    search result has no date metadata but the text itself has a dateline
+    publish-date field first, then a date decoded from the URL itself (e.g.
+    BusinessWire), then falls back to sniffing an explicit date out of
+    `fallback_text` (title/excerpt) -- this catches cases where the search
+    result has no date metadata but the text or URL carries one anyway
     (which, left unhandled, let stale/old articles through as "undated and
     therefore exempt" in earlier runs)."""
     pub_dt = None
@@ -123,6 +147,8 @@ def _within_window(
             pub_dt = dateparser.parse(published_raw, fuzzy=True)
         except (ValueError, OverflowError):
             pub_dt = None
+    if pub_dt is None:
+        pub_dt = _date_from_url(url)
     if pub_dt is None:
         pub_dt = _sniff_date(fallback_text)
     if pub_dt is None:
@@ -143,24 +169,28 @@ def _raw_result_to_article(
     start_dt: datetime,
     end_dt: datetime,
 ) -> Article | None:
-    is_official_source = bool(
+    is_own_domain = bool(
         result.source_domain
-        and (
-            (task.company.website and _domain_match(task.company.website, result.source_domain))
-            or any(d in result.source_domain for d in _PRESS_WIRE_DOMAINS_SET)
-        )
+        and task.company.website
+        and _domain_match(task.company.website, result.source_domain)
     )
 
     within_window, date_known = _within_window(
-        result.published_date, start_dt, end_dt, fallback_text=f"{result.title} {result.excerpt}"
+        result.published_date,
+        start_dt,
+        end_dt,
+        fallback_text=f"{result.title} {result.excerpt}",
+        url=result.url,
     )
     if date_known and not within_window:
         return None  # outside the requested reporting window
-    if not date_known and not is_official_source:
-        # An undated result from a random (non-official, non-wire) source is
-        # usually a generic reference page, not a dated news article -- drop
-        # it rather than guess. Official/wire pages are kept since the
-        # company itself (or the wire) is the authority on it being current.
+    if not date_known and not is_own_domain:
+        # Undated items are only trusted when they're on the company's OWN
+        # verified domain -- real feedback showed press-wire archives
+        # (BusinessWire, PR Newswire) are the dominant source of "old news"
+        # complaints: a wire service re-indexing a 2021-2023 release with no
+        # date metadata is indistinguishable from today's without a
+        # confirmed date, so a wire alone is no longer enough to exempt it.
         return None
 
     if is_generic_page(result.url, result.title, result.source_domain, task.company):
@@ -230,7 +260,9 @@ def run_company(
     start_dt: datetime,
     end_dt: datetime,
 ) -> list[Article]:
-    tasks = build_tasks_for_company(company, geographies)
+    tasks = build_tasks_for_company(
+        company, geographies, start_dt.strftime(DATE_FMT), end_dt.strftime(DATE_FMT)
+    )
     articles: list[Article] = []
     for task in tasks:
         raw_results = client.search(task.objective, task.search_queries, company.name, task.lane)
@@ -278,49 +310,73 @@ def enrich_with_full_summaries(
     to_drop: set[int] = set()
     batch_size = 20
     batches = [urls[i : i + batch_size] for i in range(0, len(urls), batch_size)]
+    content_map: dict[str, str | None] = {}
 
     with ThreadPoolExecutor(max_workers=settings.max_concurrent_requests) as pool:
         futures = [pool.submit(client.extract, batch) for batch in batches]
-        for fut in tqdm(as_completed(futures), total=len(futures), desc="Full-text summaries", unit="batch"):
-            content_map = fut.result()
-            for url, full_content in content_map.items():
-                for art in url_to_articles.get(url, []):
-                    if not full_content or not full_content.strip():
-                        # Full-text extraction failed -- at least clean the
-                        # short fallback excerpt of any nav/boilerplate junk
-                        # it may carry, rather than leaving it raw.
-                        art.summary_en = clean_short_summary(art.summary_en)
-                        art.review_flag = _append_flag(art.review_flag, "Full article unavailable - short summary only")
-                        continue
+        for fut in tqdm(as_completed(futures), total=len(futures), desc="Full-text extraction", unit="batch"):
+            content_map.update(fut.result())
 
-                    # Datelines are conventionally near the top of a press
-                    # release/article; only sniff the first ~800 chars so an
-                    # unrelated date mentioned deep in the body (e.g. "since
-                    # its 2016 founding") can't cause a false stale-drop.
-                    sniffed = _sniff_date(full_content[:800])
-                    if sniffed is not None:
-                        if sniffed.tzinfo is not None:
-                            sniffed = sniffed.replace(tzinfo=None)
-                        if not (start_dt <= sniffed <= end_dt):
-                            to_drop.add(id(art))
-                            continue
+    # A URL can fail inside a mixed batch of 20 for a transient reason (a
+    # single slow/blocked page) even when most of the batch succeeds -- one
+    # retry per URL, alone, recovers a meaningful share of these rather than
+    # accepting the batch's partial failure as final. This directly targets
+    # the "Incomplete Title and Summary" feedback, which traced back to
+    # extraction failing and leaving only a bare, near-empty fallback.
+    failed_urls = [u for u, c in content_map.items() if not c or not c.strip()]
+    if failed_urls:
+        with ThreadPoolExecutor(max_workers=settings.max_concurrent_requests) as pool:
+            futures = {pool.submit(client.extract, [u]): u for u in failed_urls}
+            for fut in tqdm(as_completed(futures), total=len(futures), desc="Retrying failed extractions", unit="url"):
+                content_map.update(fut.result())
 
-                    translated, translate_ok = translate_to_english(full_content)
-                    if not translate_ok:
-                        art.review_flag = _append_flag(art.review_flag, "Translation uncertain")
+    for url, full_content in content_map.items():
+        for art in url_to_articles.get(url, []):
+            # A date decoded straight from the URL (e.g. BusinessWire's
+            # YYYYMMDD path) is checked even when extraction failed --
+            # real feedback showed wire-service staleness is common enough
+            # that this is worth doing independently of full-text content.
+            url_date = _date_from_url(url)
+            if url_date is not None and not (start_dt <= url_date <= end_dt):
+                to_drop.add(id(art))
+                continue
 
-                    # A short excerpt can misleadingly show the company name
-                    # near the top while the full article is actually about
-                    # something else (seen in practice: a passing mention in
-                    # an unrelated local-news digest). Re-check against the
-                    # full text before trusting it enough to summarize.
-                    if not is_prominent_in_full_text(art.company, art.headline_en, translated):
-                        to_drop.add(id(art))
-                        continue
+            if not full_content or not full_content.strip():
+                # Full-text extraction failed -- at least clean the
+                # short fallback excerpt of any nav/boilerplate junk
+                # it may carry, rather than leaving it raw.
+                art.summary_en = clean_short_summary(art.summary_en)
+                art.review_flag = _append_flag(art.review_flag, "Full article unavailable - short summary only")
+                continue
 
-                    art.summary_en = summarize(
-                        translated, focus_terms=[art.company], target_words=450, max_words=500
-                    )
+            # Datelines are conventionally near the top of a press
+            # release/article; only sniff the first ~800 chars so an
+            # unrelated date mentioned deep in the body (e.g. "since
+            # its 2016 founding") can't cause a false stale-drop.
+            sniffed = _sniff_date(full_content[:800])
+            if sniffed is not None:
+                if sniffed.tzinfo is not None:
+                    sniffed = sniffed.replace(tzinfo=None)
+                if not (start_dt <= sniffed <= end_dt):
+                    to_drop.add(id(art))
+                    continue
+
+            translated, translate_ok = translate_to_english(full_content)
+            if not translate_ok:
+                art.review_flag = _append_flag(art.review_flag, "Translation uncertain")
+
+            # A short excerpt can misleadingly show the company name
+            # near the top while the full article is actually about
+            # something else (seen in practice: a passing mention in
+            # an unrelated local-news digest). Re-check against the
+            # full text before trusting it enough to summarize.
+            if not is_prominent_in_full_text(art.company, art.headline_en, translated):
+                to_drop.add(id(art))
+                continue
+
+            art.summary_en = summarize(
+                translated, focus_terms=[art.company], target_words=450, max_words=500
+            )
 
     if to_drop:
         print(f"  Dropped {len(to_drop)} article(s) that turned out to be stale or not actually about the company.")

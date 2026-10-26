@@ -148,7 +148,18 @@ The code is split into small, single-purpose modules under `tracker/`:
   query tends to miss in favor of big funding/M&A headlines.
 - `parallel_client.py` -- talks to the Parallel.ai Search and Extract APIs,
   with retry/backoff and a concurrency limit; failed queries are logged and
-  retried once more at the end of the run.
+  retried once more at the end of the run. A failed full-text extraction is
+  also retried once on its own (outside a batch), which recovers a
+  meaningful share of transient per-URL failures.
+- **Dates**: every search objective now states the exact required date
+  range explicitly (not just "recent"). An undated result is only kept
+  when it's on the company's own verified website (`Official Website` in
+  the Excel) -- a press-wire hit with no date is dropped rather than
+  assumed current, since real runs showed wire archives (BusinessWire,
+  PR Newswire) resurfacing years-old releases with no date metadata often
+  enough to be the top complaint. BusinessWire's URLs encode the exact
+  publish date in the path itself, which is decoded and checked directly
+  wherever present -- the single most reliable date signal available.
 - `translator.py` -- translates non-English titles/article text to English.
 - `relevance.py` -- drops generic profile/directory pages (LinkedIn,
   Wikipedia, Crunchbase, "About Us" pages) and passing mentions where the

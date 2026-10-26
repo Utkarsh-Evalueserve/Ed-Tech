@@ -91,7 +91,17 @@ class ParallelClient:
                         objective=objective,
                         search_queries=queries,
                         mode=self.mode,
-                        advanced_settings={"max_results": self.max_results},
+                        advanced_settings={
+                            "max_results": self.max_results,
+                            # A larger excerpt means the short fallback summary
+                            # (used whenever full-text extraction fails) is more
+                            # likely to actually include the article's dateline
+                            # and real content, instead of just a bare,
+                            # near-empty slug-derived title -- real runs showed
+                            # many "Full article unavailable" rows with almost
+                            # no usable text at the default excerpt size.
+                            "excerpt_settings": {"max_chars_per_result": 2000},
+                        },
                     )
                     return self._parse_response(resp)
                 except Exception as exc:  # noqa: BLE001 - broad on purpose, retried below
