@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from .config import CATEGORIES, EXCLUDE_PATTERNS, PRESS_WIRE_DOMAINS
-from .excel_loader import Company
+from .excel_loader import Company, Geography
 
 _EXCLUDE_RE = re.compile("|".join(EXCLUDE_PATTERNS), re.IGNORECASE)
 
@@ -36,6 +36,24 @@ _INDUSTRY_CONTEXT = [
     "student", "curriculum", "e-learning", "online course", "test prep",
     "language learning", "assessment", "training",
 ]
+
+# Domains/URL patterns that are reference/profile pages, not news -- these
+# were the "general company pages" showing up as noise in early runs.
+_GENERIC_PAGE_DOMAINS = [
+    "linkedin.com", "crunchbase.com", "wikipedia.org", "glassdoor.com",
+    "indeed.com", "owler.com", "zoominfo.com", "pitchbook.com",
+    "builtwith.com", "similarweb.com",
+]
+_GENERIC_PAGE_URL_PATTERNS = [
+    r"/about(-us)?/?$", r"/company/?$", r"/overview/?$", r"/profile/?$",
+    r"/wiki/", r"/directory/",
+]
+_GENERIC_TITLE_PATTERNS = [
+    r"^about\s", r"\boverview\b", r"\bcompany profile\b", r"\| linkedin\b",
+    r"^home\s*[-|]", r"\bwikipedia\b",
+]
+_GENERIC_PAGE_URL_RE = re.compile("|".join(_GENERIC_PAGE_URL_PATTERNS), re.IGNORECASE)
+_GENERIC_TITLE_RE = re.compile("|".join(_GENERIC_TITLE_PATTERNS), re.IGNORECASE)
 
 
 @dataclass
@@ -60,6 +78,30 @@ def is_excluded_noise(text: str, matched_category: Optional[str]) -> bool:
     if matched_category is not None:
         return False
     return bool(_EXCLUDE_RE.search(text))
+
+
+def is_generic_page(url: str, title: str, source_domain: str) -> bool:
+    """True for reference/profile/directory pages (LinkedIn, Wikipedia,
+    Crunchbase, an 'About Us' page, etc.) that are not news articles -- the
+    main source of 'general company pages' noise in broad searches."""
+    if any(d in source_domain for d in _GENERIC_PAGE_DOMAINS):
+        return True
+    if _GENERIC_PAGE_URL_RE.search(url or ""):
+        return True
+    if _GENERIC_TITLE_RE.search(title or ""):
+        return True
+    return False
+
+
+def company_mentioned_prominently(company: Company, headline: str, excerpt: str) -> bool:
+    """True only if the company/alias appears in the headline, or near the
+    start of the excerpt -- filters out results where the name is buried in
+    a long article about something else (a passing mention, not the subject)."""
+    names = [n.lower() for n in company.all_names()]
+    if any(n in (headline or "").lower() for n in names):
+        return True
+    lead = (excerpt or "")[:250].lower()
+    return any(n in lead for n in names)
 
 
 def classify_category(text: str) -> Optional[str]:
@@ -104,6 +146,17 @@ def score_relevance(
         score -= 0.2
 
     return max(0.0, min(1.0, round(score, 2)))
+
+
+def detect_geography(text: str, geographies: List[Geography], default: str = "Global") -> str:
+    """Attributes a result to one of the tracked geographies by checking for
+    an explicit country-name mention, instead of forcing a separate API call
+    per country. Falls back to 'Global' when no specific country is named."""
+    lower = text.lower()
+    for geo in geographies:
+        if geo.country.lower() in lower:
+            return geo.country
+    return default
 
 
 def _domain(url: str) -> str:

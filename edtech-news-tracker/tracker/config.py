@@ -62,26 +62,25 @@ class Settings:
     output_dir: Path = PROJECT_ROOT / "output"
     checkpoint_dir: Path = PROJECT_ROOT / ".state"
 
-    max_concurrent_requests: int = int(os.getenv("MAX_CONCURRENT_REQUESTS", "5"))
+    # With the 2-call-per-company design (~560 calls for a 280-company list),
+    # a higher concurrency is safe and keeps a 1-day run well under an hour.
+    # Lower this if your Parallel.ai plan's rate limit triggers 429s.
+    max_concurrent_requests: int = int(os.getenv("MAX_CONCURRENT_REQUESTS", "10"))
     max_retries: int = int(os.getenv("MAX_RETRIES", "4"))
     backoff_base_seconds: float = float(os.getenv("BACKOFF_BASE_SECONDS", "2"))
-
-    # Per the brief: full coverage by default (missing an article is the main
-    # risk). Lower this in .env only if a run needs to be scoped down for
-    # cost/time during testing.
-    max_geographies_per_company: int = int(
-        os.getenv("MAX_GEOGRAPHIES_PER_COMPANY", "0")
-    )  # 0 = no limit, search every geography for every company
 
     relevance_review_threshold: float = float(
         os.getenv("RELEVANCE_REVIEW_THRESHOLD", "0.55")
     )
 
-    # One of: turbo, fast, basic, advanced (increasing thoroughness/cost).
-    # Defaults to "advanced" because missing a relevant article is the main
-    # risk this tool is meant to avoid; dial down in .env for cost/speed.
-    parallel_mode: str = os.getenv("PARALLEL_MODE", "advanced")
-    max_results_per_query: int = int(os.getenv("MAX_RESULTS_PER_QUERY", "10"))
+    # One of: turbo, fast, basic, advanced (increasing thoroughness/latency).
+    # "basic" is the default: it's fast enough to keep a full daily run
+    # inside the ~45-60 minute target while still being a real web search
+    # (not just a keyword match). Try "advanced" if you have time budget to
+    # spare and want deeper recall.
+    parallel_mode: str = os.getenv("PARALLEL_MODE", "basic")
+    # Fewer, higher-quality results per query -- cuts both noise and latency.
+    max_results_per_query: int = int(os.getenv("MAX_RESULTS_PER_QUERY", "6"))
 
     def __post_init__(self):
         self.output_dir.mkdir(parents=True, exist_ok=True)

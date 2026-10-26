@@ -82,10 +82,13 @@ End date   [Enter = now]:       2026-09-30
 Press Enter on both (leave them blank) to default to the last 24 hours --
 this is what you'd normally use for the daily run.
 
-A progress bar will show companies being processed. This can take a while
-(up to several hours for a full run across all 82 geographies), since the
-tool is deliberately thorough: missing a relevant article is treated as a
-worse outcome than a long run time.
+A progress bar will show companies being processed. Each company runs 2
+focused searches (its own newsroom/press-wire coverage, and a broader
+local/regional search), so a full run across all 280 companies is typically
+**under an hour** for a 1-day window (around 560 API calls total). Raise
+`MAX_CONCURRENT_REQUESTS` in `.env` if you want it faster and your Parallel.ai
+plan's rate limit allows it; switch `PARALLEL_MODE` to `advanced` if you'd
+rather trade some speed for deeper recall.
 
 ### If it gets interrupted
 Just run `python edtech_news_tracker.py` again with the **same date range**.
@@ -101,10 +104,13 @@ output/EdTech_News_<start-date>_to_<end-date>.xlsx
 It has two tabs:
 - **News**: one row per article, with company, geography, category, an
   English headline and 2-3 line summary, source, publication date, URL, a
-  relevance score (0-1), and a review flag. Nothing is silently dropped --
-  low-confidence matches are kept and flagged (`Low confidence`,
-  `Date unverified`, etc.) so a human can take a quick look rather than the
-  tool guessing wrong.
+  relevance score (0-1), and a review flag. The tool only keeps results that
+  are genuinely *about* the company (not generic profile/directory pages like
+  LinkedIn or Wikipedia, and not articles where the name is just mentioned
+  in passing alongside others) and that match a real news category. Among
+  those, anything still uncertain is kept and flagged (`Low confidence`,
+  `Date unverified`, etc.) rather than silently dropped, so a human can take
+  a quick look rather than the tool guessing wrong.
 - **Run Log**: how many companies/geographies were searched, articles
   found, which companies had zero news that day, any queries that failed
   even after retries, and total run time.
@@ -120,14 +126,20 @@ automatically if you want it fully hands-off.
 The code is split into small, single-purpose modules under `tracker/`:
 - `config.py` -- settings, API key loading, category list.
 - `excel_loader.py` -- reads and validates `edtech_tracking_list.xlsx`.
-- `query_builder.py` -- builds the official-site, press-wire and per-geography
-  (local-language) search queries for each company.
+- `query_builder.py` -- builds 2 focused searches per company: one for its
+  own newsroom/press-wire coverage, and one broader local/regional search
+  that lets Parallel's multilingual index surface local-language coverage
+  (geography is attributed afterward by matching the tracked country names,
+  rather than issuing a separate call per country).
 - `parallel_client.py` -- talks to the Parallel.ai Search API, with retry/
   backoff and a concurrency limit; failed queries are logged and retried
   once more at the end of the run.
 - `translator.py` -- translates non-English headlines/summaries to English.
-- `relevance.py` -- scores relevance, disambiguates similarly-named
-  companies, and classifies each article into a news category.
+- `relevance.py` -- drops generic profile/directory pages (LinkedIn,
+  Wikipedia, Crunchbase, "About Us" pages) and passing mentions where the
+  company isn't actually the subject, scores the rest for relevance,
+  disambiguates similarly-named companies, and classifies each surviving
+  article into a news category.
 - `dedup.py` -- merges duplicate/near-duplicate articles across sources.
 - `exporter.py` -- writes the final Excel report.
 - `checkpoint.py` -- saves progress so an interrupted run can resume.

@@ -22,7 +22,7 @@ from dateutil import parser as dateparser
 from tqdm import tqdm
 
 from tracker import checkpoint
-from tracker.config import load_settings, Settings
+from tracker.config import load_settings, Settings, PRESS_WIRE_DOMAINS
 from tracker.dedup import deduplicate
 from tracker.excel_loader import (
     Company, Geography, TrackingListError, load_tracking_list,
@@ -30,10 +30,14 @@ from tracker.excel_loader import (
 from tracker.exporter import RunLog, export
 from tracker.parallel_client import ParallelClient, RawResult
 from tracker.query_builder import SearchTask, build_tasks_for_company
-from tracker.relevance import Article, classify_category, is_excluded_noise, score_relevance
+from tracker.relevance import (
+    Article, classify_category, company_mentioned_prominently, detect_geography,
+    is_excluded_noise, is_generic_page, score_relevance,
+)
 from tracker.translator import translate_to_english
 
 DATE_FMT = "%Y-%m-%d"
+_PRESS_WIRE_DOMAINS_SET = set(PRESS_WIRE_DOMAINS)
 
 
 # ---------------------------------------------------------------------------
@@ -95,13 +99,31 @@ def _within_window(published_raw: str | None, start_dt: datetime, end_dt: dateti
 def _raw_result_to_article(
     result: RawResult,
     task: SearchTask,
+    geographies: list[Geography],
     settings: Settings,
     start_dt: datetime,
     end_dt: datetime,
 ) -> Article | None:
+    is_official_source = bool(
+        result.source_domain
+        and (
+            (task.company.website and _domain_match(task.company.website, result.source_domain))
+            or any(d in result.source_domain for d in _PRESS_WIRE_DOMAINS_SET)
+        )
+    )
+
     within_window, date_known = _within_window(result.published_date, start_dt, end_dt)
     if date_known and not within_window:
         return None  # outside the requested reporting window
+    if not date_known and not is_official_source:
+        # An undated result from a random (non-official, non-wire) source is
+        # usually a generic reference page, not a dated news article -- drop
+        # it rather than guess. Official/wire pages are kept since the
+        # company itself (or the wire) is the authority on it being current.
+        return None
+
+    if is_generic_page(result.url, result.title, result.source_domain):
+        return None  # LinkedIn/Wikipedia/Crunchbase/"About Us"-style pages, not news
 
     headline_en, headline_ok = translate_to_english(result.title)
     summary_raw = result.excerpt[:600]
@@ -111,8 +133,13 @@ def _raw_result_to_article(
     if len(summary_en) > 480:
         summary_en = summary_en[:477] + "..."
 
+    if not company_mentioned_prominently(task.company, headline_en, summary_en):
+        return None  # name only appears in passing, not actually about this company
+
     combined_text = f"{headline_en} {summary_en}"
     category = classify_category(combined_text)
+    if category is None:
+        return None  # no recognizable news-category signal at all
     if is_excluded_noise(combined_text, category):
         return None
 
@@ -127,13 +154,10 @@ def _raw_result_to_article(
         review_reasons.append("Date unverified")
     if not headline_ok or not summary_ok:
         review_reasons.append("Translation uncertain")
-    if category is None:
-        review_reasons.append("Category unclear")
-        category = "Uncategorized"
 
     review_flag = "; ".join(review_reasons) if review_reasons else "OK"
 
-    geography_name = task.geography.country if task.geography else "Global"
+    geography_name = detect_geography(combined_text, geographies)
 
     return Article(
         company=task.company.name,
@@ -149,6 +173,11 @@ def _raw_result_to_article(
     )
 
 
+def _domain_match(website: str, source_domain: str) -> bool:
+    w = website.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0]
+    return bool(w) and w in source_domain
+
+
 # ---------------------------------------------------------------------------
 # Main run
 # ---------------------------------------------------------------------------
@@ -160,13 +189,12 @@ def run_company(
     start_dt: datetime,
     end_dt: datetime,
 ) -> list[Article]:
-    tasks = build_tasks_for_company(company, geographies, settings.max_geographies_per_company)
+    tasks = build_tasks_for_company(company, geographies)
     articles: list[Article] = []
     for task in tasks:
-        geo_name = task.geography.country if task.geography else None
-        raw_results = client.search(task.objective, task.search_queries, company.name, task.lane, geo_name)
+        raw_results = client.search(task.objective, task.search_queries, company.name, task.lane)
         for r in raw_results:
-            art = _raw_result_to_article(r, task, settings, start_dt, end_dt)
+            art = _raw_result_to_article(r, task, geographies, settings, start_dt, end_dt)
             if art:
                 articles.append(art)
     return articles
