@@ -12,6 +12,7 @@ See README.md for setup instructions (this is written for a non-developer).
 """
 from __future__ import annotations
 
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -79,16 +80,53 @@ def prompt_date_range() -> tuple[datetime, datetime]:
     return start_dt, end_dt + timedelta(hours=23, minutes=59, seconds=59)
 
 
-def _within_window(published_raw: str | None, start_dt: datetime, end_dt: datetime) -> tuple[bool, bool]:
-    """Returns (within_window, date_was_parseable)."""
-    if not published_raw:
-        return True, False  # unknown date: keep, but flagged for review by caller
+_DATE_SNIFF_RE = re.compile(
+    r"\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|"
+    r"Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+"
+    r"\d{1,2},?\s+\d{4}\b"
+    r"|\b\d{4}-\d{2}-\d{2}\b"
+    r"|\b\d{1,2}\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+    r"\.?,?\s+\d{4}\b",
+    re.IGNORECASE,
+)
+
+
+def _sniff_date(text: str | None) -> datetime | None:
+    """Finds an explicit, unambiguous date (e.g. 'May 2, 2023' or
+    '2026-10-23') inside free text. Used as a fallback when a result has no
+    structured publish-date metadata, and to catch stale content (an old
+    article with a dateline baked into the text) that metadata alone missed."""
+    if not text:
+        return None
+    m = _DATE_SNIFF_RE.search(text)
+    if not m:
+        return None
     try:
-        pub_dt = dateparser.parse(published_raw, fuzzy=True)
+        return dateparser.parse(m.group(0), fuzzy=False)
     except (ValueError, OverflowError):
-        return True, False
+        return None
+
+
+def _within_window(
+    published_raw: str | None, start_dt: datetime, end_dt: datetime, fallback_text: str | None = None
+) -> tuple[bool, bool]:
+    """Returns (within_window, date_was_determined). Tries the structured
+    publish-date field first, then falls back to sniffing an explicit date
+    out of `fallback_text` (title/excerpt) -- this catches cases where the
+    search result has no date metadata but the text itself has a dateline
+    (which, left unhandled, let stale/old articles through as "undated and
+    therefore exempt" in earlier runs)."""
+    pub_dt = None
+    if published_raw:
+        try:
+            pub_dt = dateparser.parse(published_raw, fuzzy=True)
+        except (ValueError, OverflowError):
+            pub_dt = None
     if pub_dt is None:
-        return True, False
+        pub_dt = _sniff_date(fallback_text)
+    if pub_dt is None:
+        return True, False  # genuinely unknown: keep, but flagged for review by caller
     if pub_dt.tzinfo is not None:
         pub_dt = pub_dt.replace(tzinfo=None)
     return start_dt <= pub_dt <= end_dt, True
@@ -113,7 +151,9 @@ def _raw_result_to_article(
         )
     )
 
-    within_window, date_known = _within_window(result.published_date, start_dt, end_dt)
+    within_window, date_known = _within_window(
+        result.published_date, start_dt, end_dt, fallback_text=f"{result.title} {result.excerpt}"
+    )
     if date_known and not within_window:
         return None  # outside the requested reporting window
     if not date_known and not is_official_source:
@@ -145,7 +185,7 @@ def _raw_result_to_article(
         return None
 
     score = score_relevance(
-        task.company, headline_en, summary_en, result.source_domain, within_window
+        task.company, headline_en, summary_en, result.source_domain, within_window, date_known
     )
 
     review_reasons = []
@@ -208,23 +248,34 @@ def _append_flag(existing: str, note: str) -> str:
 
 
 def enrich_with_full_summaries(
-    articles: list[Article], client: ParallelClient, settings: Settings
-) -> None:
+    articles: list[Article],
+    client: ParallelClient,
+    settings: Settings,
+    start_dt: datetime,
+    end_dt: datetime,
+) -> list[Article]:
     """For each (deduplicated) article, fetches the full article text via
     Parallel's extract API, translates it to English if needed, and replaces
     the short search-excerpt summary with a real extractive summary covering
     the article's crux (~400-500 words). Runs only after dedup so each URL
     is fetched once, not once per raw search hit. Falls back to the original
     short summary -- never drops the article -- if extraction fails for a
-    URL (paywalled, blocked, etc.)."""
+    URL (paywalled, blocked, etc.).
+
+    Also catches stale content whose dateline only shows up in the full
+    body text (not in the search result's metadata or excerpt, so the
+    earlier date check couldn't see it) and drops it -- this is what let an
+    old "raises Series A" press release through as if it were current in an
+    earlier run. Returns the surviving article list."""
     url_to_articles: dict[str, list[Article]] = {}
     for art in articles:
         if art.url:
             url_to_articles.setdefault(art.url, []).append(art)
     urls = list(url_to_articles.keys())
     if not urls:
-        return
+        return articles
 
+    to_drop: set[int] = set()
     batch_size = 20
     batches = [urls[i : i + batch_size] for i in range(0, len(urls), batch_size)]
 
@@ -237,12 +288,29 @@ def enrich_with_full_summaries(
                     if not full_content or not full_content.strip():
                         art.review_flag = _append_flag(art.review_flag, "Full article unavailable - short summary only")
                         continue
+
+                    # Datelines are conventionally near the top of a press
+                    # release/article; only sniff the first ~800 chars so an
+                    # unrelated date mentioned deep in the body (e.g. "since
+                    # its 2016 founding") can't cause a false stale-drop.
+                    sniffed = _sniff_date(full_content[:800])
+                    if sniffed is not None:
+                        if sniffed.tzinfo is not None:
+                            sniffed = sniffed.replace(tzinfo=None)
+                        if not (start_dt <= sniffed <= end_dt):
+                            to_drop.add(id(art))
+                            continue
+
                     translated, translate_ok = translate_to_english(full_content)
                     if not translate_ok:
                         art.review_flag = _append_flag(art.review_flag, "Translation uncertain")
                     art.summary_en = summarize(
                         translated, focus_terms=[art.company], target_words=450, max_words=500
                     )
+
+    if to_drop:
+        print(f"  Dropped {len(to_drop)} article(s) that turned out to be older than the reporting window.")
+    return [a for a in articles if id(a) not in to_drop]
 
 
 def main() -> int:
@@ -322,7 +390,7 @@ def main() -> int:
     deduped = deduplicate(articles)
 
     print(f"Fetching full article text for {len(deduped)} articles and writing summaries...")
-    enrich_with_full_summaries(deduped, client, settings)
+    deduped = enrich_with_full_summaries(deduped, client, settings, start_dt, end_dt)
 
     run_log = RunLog(
         start_date=start_tag,

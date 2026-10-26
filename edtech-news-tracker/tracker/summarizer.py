@@ -31,13 +31,66 @@ _STOPWORDS = {
 _SENT_SPLIT_RE = re.compile(r'(?<=[.!?])\s+(?=[A-Z0-9"‘“])')
 _WORD_RE = re.compile(r"[A-Za-z']+")
 
+_MD_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+_BARE_URL_RE = re.compile(r"https?://\S+")
+_BOILERPLATE_MARKERS = (
+    "skip to content", "back to top", "contact us", "share this article",
+    "share to x", "subscribe", "follow us", "sign in", "log in", "menu",
+    "cookie", "privacy policy", "terms of service", "all rights reserved",
+    "items per page", "newsroom", "press release distribution",
+    "services & solutions", "site map", "main navigation",
+)
+
+
+def _clean_full_text(text: str) -> str:
+    """Strips site navigation/boilerplate out of raw extracted page text
+    before summarizing. Full-page extraction often prepends/interleaves menu
+    links, breadcrumbs and "Contact Us"-style chrome ahead of the actual
+    article body; left in, these polluted summaries (e.g. a summary opening
+    with 'Contact Us Contact Us Newsroom Services...' instead of the story).
+    Line-based filtering (before collapsing whitespace) lets each nav item
+    be dropped individually instead of merging into one unsplittable blob
+    with the real sentence that follows it (which length-only filtering on
+    the final joined text can't undo)."""
+    if not text:
+        return text
+    kept_lines = []
+    for line in text.splitlines():
+        stripped = re.sub(r"^#{1,6}\s*", "", line.strip())  # markdown heading syntax
+        if not stripped:
+            continue
+
+        link_matches = _MD_LINK_RE.findall(stripped)
+        anchor_only = _BARE_URL_RE.sub("", _MD_LINK_RE.sub(r"\1", stripped)).strip()
+        low = anchor_only.lower()
+
+        if len(anchor_only) < 60 and any(m in low for m in _BOILERPLATE_MARKERS):
+            continue
+        # Nav bars/breadcrumbs pack many links into few words (e.g. "Contact
+        # Us Contact Us" from 3 links) -- a real sentence with one incidental
+        # link has far more words per link. Using a word-count ratio (not a
+        # character ratio) avoids being thrown off by long URLs diluting a
+        # character-based density check.
+        word_count = max(len(anchor_only.split()), 1)
+        if link_matches and len(link_matches) / word_count > 0.3:
+            continue
+        # Breadcrumb trails ("* X / * Y / * Z") use repeated separators that
+        # real prose essentially never does.
+        if stripped.count(" * ") >= 2 or stripped.count(" / ") >= 2:
+            continue
+
+        kept_lines.append(anchor_only if link_matches else stripped)
+
+    cleaned = " ".join(kept_lines)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
 
 def _split_sentences(text: str) -> List[str]:
     text = re.sub(r"\s+", " ", text or "").strip()
     if not text:
         return []
     sentences = _SENT_SPLIT_RE.split(text)
-    return [s.strip() for s in sentences if len(s.strip()) >= 25]
+    return [s.strip() for s in sentences if len(s.strip()) >= 40 and len(s.split()) >= 7]
 
 
 def _words(sentence: str) -> List[str]:
@@ -54,6 +107,7 @@ def summarize(
     the highest-scoring sentences (by word-frequency + lead-sentence bonus +
     mention of `focus_terms`, e.g. the company name) otherwise, capped at
     `max_words` and kept in original article order for readability."""
+    text = _clean_full_text(text)
     sentences = _split_sentences(text)
     if not sentences:
         words = (text or "").split()

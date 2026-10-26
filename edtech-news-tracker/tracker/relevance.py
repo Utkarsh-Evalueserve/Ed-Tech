@@ -51,6 +51,11 @@ _GENERIC_PAGE_URL_PATTERNS = [
 _GENERIC_TITLE_PATTERNS = [
     r"^about\s", r"\boverview\b", r"\bcompany profile\b", r"\| linkedin\b",
     r"^home\s*[-|]", r"\bwikipedia\b",
+    # Wire-service topic/index pages (e.g. "X News and Press Releases | PR
+    # Newswire", "Press Releases | Y") -- a feed of many stories, not one
+    # article. These showed up as noise/stale-content rows in real runs.
+    r"news (and|&) press releases", r"^press releases\b",
+    r"news,\s*analysis,\s*announcements",
 ]
 _GENERIC_PAGE_URL_RE = re.compile("|".join(_GENERIC_PAGE_URL_PATTERNS), re.IGNORECASE)
 _GENERIC_TITLE_RE = re.compile("|".join(_GENERIC_TITLE_PATTERNS), re.IGNORECASE)
@@ -120,6 +125,7 @@ def score_relevance(
     excerpt: str,
     source_domain: str,
     within_date_window: bool,
+    date_known: bool = True,
 ) -> float:
     text = f"{headline} {excerpt}".lower()
     score = 0.0
@@ -140,10 +146,13 @@ def score_relevance(
     if any(term in text for term in _INDUSTRY_CONTEXT):
         score += 0.2
 
-    if within_date_window:
-        score += 0.1
-    else:
-        score -= 0.2
+    # A genuinely-confirmed date is a signal either way; an UNKNOWN date is
+    # neutral, not a free bonus -- otherwise undated items (which are also
+    # exempt from the date-window drop) get an inflated score that can mask
+    # a wrong-entity match (e.g. a same-named but unrelated company/product)
+    # that happens to lack a parseable publish date.
+    if date_known:
+        score += 0.1 if within_date_window else -0.2
 
     return max(0.0, min(1.0, round(score, 2)))
 
