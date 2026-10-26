@@ -11,16 +11,18 @@ from pathlib import Path
 from typing import List
 
 import openpyxl
-from openpyxl.styles import Font, PatternFill
+from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from .relevance import Article
 
 NEWS_COLUMNS = [
-    "Company", "Geography", "News Category", "Headline (English)",
-    "English Summary", "Source Name", "Publication Date", "URL",
+    "Company", "Geography", "News Category", "Article Title (English)",
+    "Article Summary (English, ~400-500 words)", "Source Name", "Publication Date", "Source Link",
     "Relevance Score", "Review Flag",
 ]
+_SUMMARY_COL = 5
+_TITLE_COL = 4
 
 
 @dataclass
@@ -49,14 +51,19 @@ def export(articles: List[Article], run_log: RunLog, output_dir: Path) -> Path:
     ws_news = wb.active
     ws_news.title = "News"
     ws_news.append(NEWS_COLUMNS)
+    wrap_top = Alignment(wrap_text=True, vertical="top")
     for art in sorted(articles, key=lambda a: (a.company, a.geography, -a.relevance_score)):
+        row_idx = ws_news.max_row + 1
         ws_news.append([
             art.company, art.geography, art.category, art.headline_en,
             art.summary_en, art.source_name, art.publication_date or "",
             art.url, art.relevance_score, art.review_flag,
         ])
+        ws_news.cell(row=row_idx, column=_SUMMARY_COL).alignment = wrap_top
+        ws_news.cell(row=row_idx, column=_TITLE_COL).alignment = wrap_top
+        ws_news.row_dimensions[row_idx].height = 110  # fits ~400-500 words wrapped at the column width below
     _style_header(ws_news)
-    for idx, width in enumerate([25, 15, 30, 45, 55, 30, 15, 45, 12, 20], start=1):
+    for idx, width in enumerate([25, 15, 30, 40, 90, 30, 15, 45, 12, 20], start=1):
         ws_news.column_dimensions[get_column_letter(idx)].width = width
     ws_news.freeze_panes = "A2"
 

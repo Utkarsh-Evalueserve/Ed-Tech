@@ -84,8 +84,10 @@ this is what you'd normally use for the daily run.
 
 A progress bar will show companies being processed. Each company runs 2
 focused searches (its own newsroom/press-wire coverage, and a broader
-local/regional search), so a full run across all 280 companies is typically
-**under an hour** for a 1-day window (around 560 API calls total). Raise
+local/regional search); after irrelevant results and duplicates are removed,
+there's one more pass that fetches the full text of each surviving article to
+build its 400-500 word summary. A full run across all 280 companies is
+typically **under an hour** for a 1-day window. Raise
 `MAX_CONCURRENT_REQUESTS` in `.env` if you want it faster and your Parallel.ai
 plan's rate limit allows it; switch `PARALLEL_MODE` to `advanced` if you'd
 rather trade some speed for deeper recall.
@@ -102,15 +104,19 @@ Each run produces a file named:
 output/EdTech_News_<start-date>_to_<end-date>.xlsx
 ```
 It has two tabs:
-- **News**: one row per article, with company, geography, category, an
-  English headline and 2-3 line summary, source, publication date, URL, a
-  relevance score (0-1), and a review flag. The tool only keeps results that
-  are genuinely *about* the company (not generic profile/directory pages like
-  LinkedIn or Wikipedia, and not articles where the name is just mentioned
-  in passing alongside others) and that match a real news category. Among
-  those, anything still uncertain is kept and flagged (`Low confidence`,
-  `Date unverified`, etc.) rather than silently dropped, so a human can take
-  a quick look rather than the tool guessing wrong.
+- **News**: one row per article, with company, geography, category, the
+  article title, a ~400-500 word English summary covering the article's
+  crux, source name, publication date, and the source link, plus a
+  relevance score (0-1) and a review flag. Titles and summaries are
+  translated to English automatically when the source article is in another
+  language. The tool only keeps results that are genuinely *about* the
+  company (not generic profile/directory pages like LinkedIn or Wikipedia,
+  and not articles where the name is just mentioned in passing alongside
+  others) and that match a real news category. Among those, anything still
+  uncertain is kept and flagged (`Low confidence`, `Date unverified`,
+  `Full article unavailable - short summary only`, etc.) rather than
+  silently dropped, so a human can take a quick look rather than the tool
+  guessing wrong.
 - **Run Log**: how many companies/geographies were searched, articles
   found, which companies had zero news that day, any queries that failed
   even after retries, and total run time.
@@ -131,16 +137,23 @@ The code is split into small, single-purpose modules under `tracker/`:
   that lets Parallel's multilingual index surface local-language coverage
   (geography is attributed afterward by matching the tracked country names,
   rather than issuing a separate call per country).
-- `parallel_client.py` -- talks to the Parallel.ai Search API, with retry/
-  backoff and a concurrency limit; failed queries are logged and retried
-  once more at the end of the run.
-- `translator.py` -- translates non-English headlines/summaries to English.
+- `parallel_client.py` -- talks to the Parallel.ai Search and Extract APIs,
+  with retry/backoff and a concurrency limit; failed queries are logged and
+  retried once more at the end of the run.
+- `translator.py` -- translates non-English titles/article text to English.
 - `relevance.py` -- drops generic profile/directory pages (LinkedIn,
   Wikipedia, Crunchbase, "About Us" pages) and passing mentions where the
   company isn't actually the subject, scores the rest for relevance,
   disambiguates similarly-named companies, and classifies each surviving
   article into a news category.
-- `dedup.py` -- merges duplicate/near-duplicate articles across sources.
+- `dedup.py` -- merges duplicate/near-duplicate articles across sources
+  (after which each surviving URL's full text is fetched once -- see below
+  -- rather than once per raw search hit).
+- `summarizer.py` -- after dedup, the full article text is fetched (via
+  Parallel's Extract API) and translated if needed, then this picks the
+  most representative actual sentences from it (not AI-generated text,
+  to avoid misstating facts) to build a ~400-500 word summary capturing
+  the article's crux.
 - `exporter.py` -- writes the final Excel report.
 - `checkpoint.py` -- saves progress so an interrupted run can resume.
 

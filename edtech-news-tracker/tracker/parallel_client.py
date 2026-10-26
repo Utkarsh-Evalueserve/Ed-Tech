@@ -43,6 +43,7 @@ class FailedQuery:
     geography: Optional[str]
     objective: str
     error: str
+    urls: Optional[List[str]] = None  # populated for lane == "extract"
 
 
 class ParallelClient:
@@ -109,6 +110,49 @@ class ParallelClient:
             )
         return []
 
+    def extract(self, urls: List[str], max_chars_per_result: int = 4000) -> dict[str, Optional[str]]:
+        """Fetches full article text for a batch of URLs (used to build a
+        real 400-500 word summary instead of a short search excerpt). Never
+        raises; URLs that fail are logged for the end-of-run retry pass and
+        come back as None so the caller can fall back to the short excerpt."""
+        result_map: dict[str, Optional[str]] = {u: None for u in urls}
+        last_error = "unknown error"
+        with self._sem:
+            for attempt in range(self.max_retries + 1):
+                try:
+                    resp = self._client.extract(
+                        urls=urls,
+                        advanced_settings={"full_content": {"max_chars_per_result": max_chars_per_result}},
+                    )
+                    for r in self._extract_results(resp):
+                        get = (lambda k, default=None: getattr(r, k, default)) if not isinstance(r, dict) else r.get
+                        url = get("url")
+                        if url:
+                            result_map[url] = get("full_content")
+                    return result_map
+                except Exception as exc:  # noqa: BLE001
+                    last_error = str(exc)
+                    is_rate_limit = "429" in last_error or "rate limit" in last_error.lower()
+                    if attempt < self.max_retries:
+                        delay = self.backoff_base * (2**attempt) + random.uniform(0, 1)
+                        if is_rate_limit:
+                            delay *= 1.5
+                        time.sleep(delay)
+                        continue
+
+        with self._lock:
+            self.failed_queries.append(
+                FailedQuery("(batch)", "extract", None, f"{len(urls)} urls", last_error, urls=urls)
+            )
+        return result_map
+
+    @staticmethod
+    def _extract_results(resp) -> List:
+        results = getattr(resp, "results", None)
+        if results is None and isinstance(resp, dict):
+            results = resp.get("results", [])
+        return results or []
+
     def retry_failed(self) -> List[FailedQuery]:
         """Retry every currently-failed query once more (end-of-run pass).
         Returns the list of queries still failing after this pass."""
@@ -116,8 +160,11 @@ class ParallelClient:
         self.failed_queries = []
         still_failed: List[FailedQuery] = []
         for fq in pending:
-            results = self.search(fq.objective, [fq.objective], fq.company_name, fq.lane, fq.geography)
-            if not results and self.failed_queries:
+            if fq.lane == "extract" and fq.urls:
+                self.extract(fq.urls)
+            else:
+                self.search(fq.objective, [fq.objective], fq.company_name, fq.lane, fq.geography)
+            if self.failed_queries:
                 still_failed.extend(self.failed_queries)
                 self.failed_queries = []
         return still_failed

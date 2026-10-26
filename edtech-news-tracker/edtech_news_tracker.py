@@ -34,6 +34,7 @@ from tracker.relevance import (
     Article, classify_category, company_mentioned_prominently, detect_geography,
     is_excluded_noise, is_generic_page, score_relevance,
 )
+from tracker.summarizer import summarize
 from tracker.translator import translate_to_english
 
 DATE_FMT = "%Y-%m-%d"
@@ -200,6 +201,50 @@ def run_company(
     return articles
 
 
+def _append_flag(existing: str, note: str) -> str:
+    if not existing or existing == "OK":
+        return note
+    return existing if note in existing else f"{existing}; {note}"
+
+
+def enrich_with_full_summaries(
+    articles: list[Article], client: ParallelClient, settings: Settings
+) -> None:
+    """For each (deduplicated) article, fetches the full article text via
+    Parallel's extract API, translates it to English if needed, and replaces
+    the short search-excerpt summary with a real extractive summary covering
+    the article's crux (~400-500 words). Runs only after dedup so each URL
+    is fetched once, not once per raw search hit. Falls back to the original
+    short summary -- never drops the article -- if extraction fails for a
+    URL (paywalled, blocked, etc.)."""
+    url_to_articles: dict[str, list[Article]] = {}
+    for art in articles:
+        if art.url:
+            url_to_articles.setdefault(art.url, []).append(art)
+    urls = list(url_to_articles.keys())
+    if not urls:
+        return
+
+    batch_size = 20
+    batches = [urls[i : i + batch_size] for i in range(0, len(urls), batch_size)]
+
+    with ThreadPoolExecutor(max_workers=settings.max_concurrent_requests) as pool:
+        futures = [pool.submit(client.extract, batch) for batch in batches]
+        for fut in tqdm(as_completed(futures), total=len(futures), desc="Full-text summaries", unit="batch"):
+            content_map = fut.result()
+            for url, full_content in content_map.items():
+                for art in url_to_articles.get(url, []):
+                    if not full_content or not full_content.strip():
+                        art.review_flag = _append_flag(art.review_flag, "Full article unavailable - short summary only")
+                        continue
+                    translated, translate_ok = translate_to_english(full_content)
+                    if not translate_ok:
+                        art.review_flag = _append_flag(art.review_flag, "Translation uncertain")
+                    art.summary_en = summarize(
+                        translated, focus_terms=[art.company], target_words=450, max_words=500
+                    )
+
+
 def main() -> int:
     print("=" * 70)
     print("EdTech News Tracker")
@@ -275,6 +320,9 @@ def main() -> int:
 
     print("Deduplicating articles across sources and languages...")
     deduped = deduplicate(articles)
+
+    print(f"Fetching full article text for {len(deduped)} articles and writing summaries...")
+    enrich_with_full_summaries(deduped, client, settings)
 
     run_log = RunLog(
         start_date=start_tag,
