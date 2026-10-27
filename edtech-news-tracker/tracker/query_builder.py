@@ -79,9 +79,13 @@ def build_official_press_task(company: Company, start_date: str, end_date: str) 
     objective = (
         f"Find news specifically ABOUT the education/ed-tech company '{company.name}' "
         f"(also known as: {aliases_txt}) -- not pages that merely mention the name in passing. "
-        f"Only count: press releases or news posted on {company.name}'s own newsroom/press/blog/"
-        f"investor-relations pages, OR press releases about {company.name} distributed via "
+        f"Primary sources: press releases or news posted on {company.name}'s own newsroom/press/"
+        f"blog/investor-relations pages, OR press releases about {company.name} distributed via "
         f"major wire services (PR Newswire, Business Wire, GlobeNewswire, Cision, Accesswire). "
+        f"ALSO include an announcement hosted on a PARTNER organization's own newsroom when the "
+        f"announcement is specifically about a deal/partnership/program involving {company.name} "
+        f"(e.g. the other party in a partnership posting the release on their own site rather than "
+        f"{company.name}'s) -- do not require {company.name} to be the one hosting it. "
         f"Topics of interest: {', '.join(CATEGORIES)}. "
         f"Exclude: generic company profile/about/overview pages, directory listings, and routine "
         f"stock price or analyst rating commentary. {_date_window_clause(start_date, end_date)}"
@@ -90,6 +94,7 @@ def build_official_press_task(company: Company, start_date: str, end_date: str) 
         f"{company.name} newsroom press release{site_hint}",
         f"{_alias_clause(company)} press release ({wire_sites})",
         f"{company.name} announcement OR partnership OR appointment OR award",
+        f"{company.name} partners with OR signs agreement with OR collaborates with",
     ]
     return SearchTask(company, "official_press", objective, queries)
 
@@ -115,6 +120,7 @@ def build_local_regional_task(
         f'"{company.name}" news',
         f"{_alias_clause(company)} partnership OR funding OR launch OR regulation OR award",
         f"{company.name} local office OR market entry OR local partnership",
+        f"{company.name} signs OR appoints OR announces OR organizes",
     ]
     return SearchTask(company, "local_regional", objective, queries)
 
@@ -140,6 +146,7 @@ def build_events_partnerships_task(
         f"{company.name} conference OR summit OR seminar OR conclave",
         f"{_alias_clause(company)} cooperation agreement OR accreditation OR MOU",
         f"{company.name} award OR recognized OR named",
+        f"{company.name} campaign OR scholarship OR exam results OR workshop",
     ]
     return SearchTask(company, "events_partnerships", objective, queries)
 

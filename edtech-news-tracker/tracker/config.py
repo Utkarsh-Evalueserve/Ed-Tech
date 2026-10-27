@@ -79,7 +79,11 @@ class Settings:
     # Given the time-budget headroom above, "advanced" is now the default
     # for better recall; drop to "basic" if a run ever gets too slow.
     parallel_mode: str = os.getenv("PARALLEL_MODE", "advanced")
-    max_results_per_query: int = int(os.getenv("MAX_RESULTS_PER_QUERY", "10"))
+    # Raised from 10: real runs kept missing small/regional sources that a
+    # bigger, more prominent result likely crowded out of a shorter top-N
+    # list -- more candidates per query gives long-tail local coverage more
+    # of a chance to surface at all.
+    max_results_per_query: int = int(os.getenv("MAX_RESULTS_PER_QUERY", "20"))
 
     def __post_init__(self):
         self.output_dir.mkdir(parents=True, exist_ok=True)
