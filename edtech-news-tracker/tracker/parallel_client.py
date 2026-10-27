@@ -79,10 +79,15 @@ class ParallelClient:
         company_name: str,
         lane: str,
         geography: Optional[str] = None,
+        max_results: Optional[int] = None,
     ) -> List[RawResult]:
         """Run one search task with retry/backoff. Never raises; on final
         failure it records the failure and returns an empty list so the run
-        continues and nothing silently blocks the rest of the batch."""
+        continues and nothing silently blocks the rest of the batch.
+
+        `max_results` overrides the client default for this one call -- used
+        to request far fewer results for the high-volume, mostly-empty
+        geography sweep than for the official/global lanes."""
         last_error = "unknown error"
         with self._sem:
             for attempt in range(self.max_retries + 1):
@@ -92,7 +97,7 @@ class ParallelClient:
                         search_queries=queries,
                         mode=self.mode,
                         advanced_settings={
-                            "max_results": self.max_results,
+                            "max_results": max_results if max_results is not None else self.max_results,
                             # A larger excerpt means the short fallback summary
                             # (used whenever full-text extraction fails) is more
                             # likely to actually include the article's dateline

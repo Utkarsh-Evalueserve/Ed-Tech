@@ -263,12 +263,32 @@ def run_company(
     start_dt: datetime,
     end_dt: datetime,
 ) -> list[Article]:
+    # The 82-country sweep is the expensive part of a run (the large
+    # majority of those calls find nothing) -- only run it for companies in
+    # a tier where local/regional news is central to the business (see
+    # Settings.full_sweep_category_codes). A company with no Category Code
+    # at all (not in the master list) still gets the full sweep, so an
+    # untagged company's coverage is never silently reduced; only ones
+    # explicitly categorized outside the full-sweep tiers are scoped down.
+    qualifies_for_full_sweep = (
+        not company.category_code
+        or company.category_code.upper() in settings.full_sweep_category_codes
+    )
+    effective_geographies = geographies if qualifies_for_full_sweep else []
+
     tasks = build_tasks_for_company(
-        company, geographies, start_dt.strftime(DATE_FMT), end_dt.strftime(DATE_FMT)
+        company, effective_geographies, start_dt.strftime(DATE_FMT), end_dt.strftime(DATE_FMT)
     )
     articles: list[Article] = []
     for task in tasks:
-        raw_results = client.search(task.objective, task.search_queries, company.name, task.lane)
+        max_results = (
+            settings.geography_max_results_per_query
+            if task.lane == "geography"
+            else settings.max_results_per_query
+        )
+        raw_results = client.search(
+            task.objective, task.search_queries, company.name, task.lane, max_results=max_results
+        )
         for r in raw_results:
             art = _raw_result_to_article(r, task, geographies, settings, start_dt, end_dt)
             if art:

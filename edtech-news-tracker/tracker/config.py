@@ -62,13 +62,6 @@ class Settings:
     output_dir: Path = PROJECT_ROOT / "output"
     checkpoint_dir: Path = PROJECT_ROOT / ".state"
 
-    # query_builder now issues ~1 call per (company, geography) pair --
-    # ~84 calls/company, ~23,500 total for a 280-company/82-geography list
-    # -- a deliberate choice to prioritize catching every article over
-    # runtime (see README). With that many calls, concurrency is the main
-    # lever on total time: raising this is the fastest way to speed a run
-    # up, as long as your Parallel.ai plan's rate limit tolerates it (watch
-    # the Run Log's "Failed queries" count for 429s if you raise it).
     max_concurrent_requests: int = int(os.getenv("MAX_CONCURRENT_REQUESTS", "15"))
     max_retries: int = int(os.getenv("MAX_RETRIES", "4"))
     backoff_base_seconds: float = float(os.getenv("BACKOFF_BASE_SECONDS", "2"))
@@ -77,14 +70,38 @@ class Settings:
         os.getenv("RELEVANCE_REVIEW_THRESHOLD", "0.55")
     )
 
-    # One of: turbo, fast, basic, advanced (increasing thoroughness/latency).
-    # Back to "basic": now that per-geography call COUNT is the main recall
-    # lever (not a few broad, deep calls), per-call depth matters less and
-    # per-call speed matters more for keeping a ~23,500-call run's total
-    # time manageable. Try "advanced" only if basic's recall still feels
-    # thin after the geography breadth change.
+    # A full 82-geography sweep for every company proved expensive (~$500
+    # for one run) because the large majority of (company, geography) pairs
+    # find nothing -- most companies only ever generate news in a handful
+    # of countries, if any, on a given day. Rather than searching all 82
+    # countries for every company regardless of relevance, the per-geography
+    # sweep now only runs for companies in these Category Code tiers (from
+    # the tracking list's Category Code column); every other company still
+    # gets the 2 cheap official/global searches, just not the 82-country
+    # sweep. Default: A (English/Language Learning), B (Assessment/Exam),
+    # C (EdTech/Online Learning/Publishing) -- the categories where local,
+    # country-specific news (local partnerships, exam centers, regional
+    # launches) is most central to the business and most likely to be
+    # missed by a global-only search. A company with no Category Code set
+    # (not in the master list) defaults to getting the full sweep anyway,
+    # so an untagged company's coverage is never silently reduced.
+    full_sweep_category_codes: set[str] = field(
+        default_factory=lambda: {
+            c.strip().upper() for c in os.getenv("FULL_SWEEP_CATEGORIES", "A,B,C").split(",") if c.strip()
+        }
+    )
+
+    # One of: turbo, fast, basic, advanced (increasing thoroughness/latency,
+    # and -- as far as can be observed without published per-mode pricing --
+    # cost). "basic" is a reasonable default for the official/global lanes,
+    # which are comparatively few calls (560 total) with a good hit rate.
     parallel_mode: str = os.getenv("PARALLEL_MODE", "basic")
     max_results_per_query: int = int(os.getenv("MAX_RESULTS_PER_QUERY", "10"))
+    # The geography lane is the expensive one (tens of thousands of calls,
+    # most finding nothing) -- a low max_results here costs nothing in
+    # practice (there's rarely more than 1-2 genuine local hits per country
+    # per day even for an active company) while keeping each call cheaper.
+    geography_max_results_per_query: int = int(os.getenv("GEOGRAPHY_MAX_RESULTS_PER_QUERY", "3"))
 
     def __post_init__(self):
         self.output_dir.mkdir(parents=True, exist_ok=True)

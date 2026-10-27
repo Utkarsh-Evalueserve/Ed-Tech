@@ -22,6 +22,7 @@ class Company:
     website: str = ""
     hq_country: str = ""
     notes: str = ""  # free-text disambiguation guidance, e.g. "NOT Apollo Global Management"
+    category_code: str = ""  # e.g. "A" (English/Language Learning) -- used to decide full vs. light geography coverage
 
     def all_names(self) -> List[str]:
         """Company name plus every alias, for search and disambiguation."""
@@ -100,6 +101,7 @@ def _load_companies(ws, messages: List[str]) -> List[Company]:
     website_col = _find_column(headers, "official website", "website")
     hq_col = _find_column(headers, "hq country", "hq", "headquarters", "hq country ")
     notes_col = _find_column(headers, "notes", "disambiguation notes", "disambiguation")
+    category_col = _find_column(headers, "category code", "category")
 
     seen: dict[str, Company] = {}
     blank_rows: List[int] = []
@@ -120,6 +122,7 @@ def _load_companies(ws, messages: List[str]) -> List[Company]:
         website = str(row[website_col]).strip() if website_col is not None and website_col < len(row) and row[website_col] else ""
         hq_country = str(row[hq_col]).strip() if hq_col is not None and hq_col < len(row) and row[hq_col] else ""
         notes = str(row[notes_col]).strip() if notes_col is not None and notes_col < len(row) and row[notes_col] else ""
+        category_code = str(row[category_col]).strip() if category_col is not None and category_col < len(row) and row[category_col] else ""
 
         if key in seen:
             dup_rows.append(name)
@@ -130,9 +133,13 @@ def _load_companies(ws, messages: List[str]) -> List[Company]:
             existing.website = existing.website or website
             existing.hq_country = existing.hq_country or hq_country
             existing.notes = existing.notes or notes
+            existing.category_code = existing.category_code or category_code
             continue
 
-        seen[key] = Company(name=name, aliases=aliases, website=website, hq_country=hq_country, notes=notes)
+        seen[key] = Company(
+            name=name, aliases=aliases, website=website, hq_country=hq_country,
+            notes=notes, category_code=category_code,
+        )
 
     if blank_rows:
         messages.append(

@@ -40,7 +40,7 @@ pip install -r requirements.txt
 
 Open `edtech_tracking_list.xlsx`. It has two tabs:
 
-- **Companies**: `Company Name`, `Aliases`, `Official Website`, `HQ Country`, `Notes`
+- **Companies**: `Company Name`, `Aliases`, `Official Website`, `HQ Country`, `Notes`, `Category Code`
   - Add a row to start tracking a new company. Delete a row to stop.
   - Fill in `Aliases` with any past/other brand names, comma-separated
     (e.g. `IDP IELTS, IDP Education`) -- this makes searches far more
@@ -61,6 +61,12 @@ Open `edtech_tracking_list.xlsx`. It has two tabs:
     could manage after the fact. 50 companies already have notes merged in
     from a master company list; add more for any company you see pulling
     in wrong-entity results.
+  - `Category Code` (A-H, from the same master company list) controls
+    whether a company gets the full, expensive 82-country search or just
+    the 2 cheap global/official searches -- see the cost section below.
+    Leave it blank for a new company and it defaults to getting the full
+    sweep (coverage is never silently reduced just because a company isn't
+    categorized yet).
 - **Geographies**: `Country`, `Primary Language(s)`, `Local News Sources`
   - `Primary Language(s)` is pre-filled with a sensible default per country
     -- edit it if a market needs an additional language.
@@ -95,22 +101,33 @@ End date   [Enter = now]:       2026-09-30
 Press Enter on both (leave them blank) to default to the last 24 hours --
 this is what you'd normally use for the daily run.
 
-A progress bar will show companies being processed. **This run is
-deliberately thorough, not fast**: each company gets its own newsroom/press-
-wire search, a broad international search, and a dedicated search for
-*each* tracked geography (so a company's local activity in any one of the
-82 countries gets a real chance to surface, rather than competing for
-attention in one shared search across all of them). For the full 280-
-company, 82-geography list, that's roughly 23,500 searches, plus a further
-pass that fetches the full text of every surviving article to build its
-summary. Expect a full run to take **on the order of 1-3 hours**, depending
-on your Parallel.ai plan's rate limit -- this was a deliberate trade:
-catching every article was prioritized over runtime, after earlier,
-faster designs kept missing genuine local/regional news. Raising
-`MAX_CONCURRENT_REQUESTS` in `.env` (if your plan's rate limit allows it)
-is the most effective way to speed this up without losing coverage; switch
-`PARALLEL_MODE` to `advanced` only if recall still feels thin after this
-change, since it adds latency per call rather than more calls.
+A progress bar will show companies being processed. Each company gets its
+own newsroom/press-wire search and a broad international search; on top of
+that, companies in the full-sweep Category Code tiers (`A`/`B`/`C` by
+default -- English/Language Learning, Assessment/Exam, EdTech/Publishing --
+see `FULL_SWEEP_CATEGORIES` in `.env.example`) also get a dedicated search
+for *each* tracked geography, so a company's local activity in any one of
+the 82 countries gets a real chance to surface. This tiering exists because
+a full 82-country sweep for every company turned out to be expensive in
+practice (a real run cost roughly $500 in Parallel.ai credits) for a
+large number of searches that found nothing -- most companies only ever
+generate news in a handful of countries, if any, on a given day. Limiting
+the expensive sweep to the company categories where local/regional news is
+most central to the business cuts total search calls by roughly a third
+without reducing coverage for the companies most likely to need it; a
+company with no Category Code at all still gets the full sweep, so an
+untagged company is never silently under-covered. Companies outside the
+full-sweep tiers still get the 2 cheap searches, which catch most
+significant news (funding, leadership, M&A, major product launches)
+regardless of geography.
+
+A full run with the default tiering is on the order of **1-2 hours** and
+noticeably cheaper than an untiered run; `MAX_CONCURRENT_REQUESTS` in
+`.env` controls speed (not cost) if your Parallel.ai plan's rate limit
+allows raising it. To cut cost further: narrow `FULL_SWEEP_CATEGORIES` to
+fewer letters, or lower `GEOGRAPHY_MAX_RESULTS_PER_QUERY`. To widen
+coverage back toward "every company, every country" at higher cost, add
+more letters (or all of A-H) to `FULL_SWEEP_CATEGORIES`.
 
 ### If it gets interrupted
 Just run `python edtech_news_tracker.py` again with the **same date range**.
@@ -154,12 +171,16 @@ The code is split into small, single-purpose modules under `tracker/`:
 - `excel_loader.py` -- reads and validates `edtech_tracking_list.xlsx`.
 - `query_builder.py` -- builds, per company: its own newsroom/press-wire
   search, a broad international search (catches a story picked up or
-  translated by a foreign outlet), and one dedicated search *per tracked
-  geography* -- the real fix for local/regional recall, after a shared,
-  all-countries-in-one-call design kept missing local partnerships,
-  conferences and awards covered only by a country's own press. A
-  company's `Notes` (disambiguation guidance) are appended to every
-  search's instructions.
+  translated by a foreign outlet), and -- for companies in a full-sweep
+  Category Code tier -- one dedicated search *per tracked geography*, the
+  fix for local/regional recall after a shared, all-countries-in-one-call
+  design kept missing local partnerships, conferences and awards covered
+  only by a country's own press. A company's `Notes` (disambiguation
+  guidance) are appended to every search's instructions.
+- `edtech_news_tracker.run_company` -- decides whether a company qualifies
+  for the full geography sweep (its `Category Code` is in
+  `FULL_SWEEP_CATEGORIES`, or it has none) before calling `query_builder`,
+  which is the main cost control (see the cost section above).
 - `parallel_client.py` -- talks to the Parallel.ai Search and Extract APIs,
   with retry/backoff and a concurrency limit; failed queries are logged and
   retried once more at the end of the run. A failed full-text extraction is
