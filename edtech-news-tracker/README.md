@@ -40,19 +40,27 @@ pip install -r requirements.txt
 
 Open `edtech_tracking_list.xlsx`. It has two tabs:
 
-- **Companies**: `Company Name`, `Aliases`, `Official Website`, `HQ Country`
+- **Companies**: `Company Name`, `Aliases`, `Official Website`, `HQ Country`, `Notes`
   - Add a row to start tracking a new company. Delete a row to stop.
   - Fill in `Aliases` with any past/other brand names, comma-separated
     (e.g. `IDP IELTS, IDP Education`) -- this makes searches far more
     accurate.
   - Filling in `Official Website` and `HQ Country` is optional but strongly
     recommended: it helps the tool tell apart companies that share a common
-    name from unrelated businesses. This matters most for short/generic
-    names -- real feedback on actual runs showed exactly this: "Apollo",
-    "Avant", "ETS" and "Edwin" each pulled in news about an unrelated
-    same-named company/product, and all four have a blank `Official
-    Website` today. Adding the real domain for a company like that is the
-    single highest-impact fix you can make without touching any code.
+    name from unrelated businesses, and also controls one specific
+    behavior -- an article with no confirmed publish date is only kept
+    when it's on the company's *own* verified website (a press-wire hit
+    with no date is dropped rather than assumed current).
+  - `Notes` is a free-text field for disambiguation guidance, sent directly
+    into the search instructions for that company -- e.g. `Apollo`'s notes
+    say "Apollo Education Group ONLY (operates University of Phoenix). NOT
+    Apollo private equity, Apollo Global Management, or Apollo Hospitals."
+    This is the single highest-impact field for a company whose name
+    collides with something else: a plain-language "NOT X, NOT Y"
+    instruction here is followed far more reliably than any keyword filter
+    could manage after the fact. 50 companies already have notes merged in
+    from a master company list; add more for any company you see pulling
+    in wrong-entity results.
 - **Geographies**: `Country`, `Primary Language(s)`, `Local News Sources`
   - `Primary Language(s)` is pre-filled with a sensible default per country
     -- edit it if a market needs an additional language.

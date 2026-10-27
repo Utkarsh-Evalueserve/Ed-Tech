@@ -55,6 +55,19 @@ def _domain(url: str) -> str:
     return url.split("/")[0]
 
 
+def _notes_clause(company: Company) -> str:
+    """Surfaces a company's disambiguation notes (from the tracking list's
+    Notes column, e.g. "Apollo Education Group ONLY. NOT Apollo private
+    equity, Apollo Global Management, or Apollo Hospitals") directly in the
+    search objective. An LLM-driven search follows a plain-language "NOT X,
+    NOT Y" instruction far more reliably than any keyword-based filter
+    applied after the fact, so this is the primary place disambiguation
+    guidance should live."""
+    if not company.notes:
+        return ""
+    return f" IMPORTANT disambiguation guidance for this company: {company.notes}"
+
+
 def _date_window_clause(start_date: str, end_date: str) -> str:
     if start_date == end_date:
         return (
@@ -89,6 +102,7 @@ def build_official_press_task(company: Company, start_date: str, end_date: str) 
         f"Topics of interest: {', '.join(CATEGORIES)}. "
         f"Exclude: generic company profile/about/overview pages, directory listings, and routine "
         f"stock price or analyst rating commentary. {_date_window_clause(start_date, end_date)}"
+        f"{_notes_clause(company)}"
     )
     queries = [
         f"{company.name} newsroom press release{site_hint}",
@@ -114,7 +128,7 @@ def build_local_regional_task(
         f"pages that just mention its name alongside many others. Restrict to these tracked "
         f"countries: {countries}. Topics of interest: {', '.join(CATEGORIES)}. "
         f"Exclude: generic company profile/directory pages and routine stock/analyst commentary. "
-        f"{_date_window_clause(start_date, end_date)}"
+        f"{_date_window_clause(start_date, end_date)}{_notes_clause(company)}"
     )
     queries = [
         f'"{company.name}" news',
@@ -140,7 +154,7 @@ def build_events_partnerships_task(
         f"big funding/M&A headlines. Restrict to these tracked countries: {countries}. Only count "
         f"articles where {company.name} is the actual subject, not a passing mention. Exclude "
         f"generic company profile/directory pages and routine stock/analyst commentary. "
-        f"{_date_window_clause(start_date, end_date)}"
+        f"{_date_window_clause(start_date, end_date)}{_notes_clause(company)}"
     )
     queries = [
         f"{company.name} conference OR summit OR seminar OR conclave",

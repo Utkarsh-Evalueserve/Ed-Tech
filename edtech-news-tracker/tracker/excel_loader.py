@@ -21,6 +21,7 @@ class Company:
     aliases: List[str] = field(default_factory=list)
     website: str = ""
     hq_country: str = ""
+    notes: str = ""  # free-text disambiguation guidance, e.g. "NOT Apollo Global Management"
 
     def all_names(self) -> List[str]:
         """Company name plus every alias, for search and disambiguation."""
@@ -98,6 +99,7 @@ def _load_companies(ws, messages: List[str]) -> List[Company]:
     alias_col = _find_column(headers, "aliases", "alias")
     website_col = _find_column(headers, "official website", "website")
     hq_col = _find_column(headers, "hq country", "hq", "headquarters", "hq country ")
+    notes_col = _find_column(headers, "notes", "disambiguation notes", "disambiguation")
 
     seen: dict[str, Company] = {}
     blank_rows: List[int] = []
@@ -117,6 +119,7 @@ def _load_companies(ws, messages: List[str]) -> List[Company]:
         aliases = _split_list(row[alias_col]) if alias_col is not None and alias_col < len(row) else []
         website = str(row[website_col]).strip() if website_col is not None and website_col < len(row) and row[website_col] else ""
         hq_country = str(row[hq_col]).strip() if hq_col is not None and hq_col < len(row) and row[hq_col] else ""
+        notes = str(row[notes_col]).strip() if notes_col is not None and notes_col < len(row) and row[notes_col] else ""
 
         if key in seen:
             dup_rows.append(name)
@@ -126,9 +129,10 @@ def _load_companies(ws, messages: List[str]) -> List[Company]:
                     existing.aliases.append(a)
             existing.website = existing.website or website
             existing.hq_country = existing.hq_country or hq_country
+            existing.notes = existing.notes or notes
             continue
 
-        seen[key] = Company(name=name, aliases=aliases, website=website, hq_country=hq_country)
+        seen[key] = Company(name=name, aliases=aliases, website=website, hq_country=hq_country, notes=notes)
 
     if blank_rows:
         messages.append(
