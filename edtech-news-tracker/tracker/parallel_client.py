@@ -120,12 +120,16 @@ class ParallelClient:
             )
         return []
 
-    def extract(self, urls: List[str], max_chars_per_result: int = 4000) -> dict[str, Optional[str]]:
+    def extract(self, urls: List[str], max_chars_per_result: int = 4000) -> dict[str, tuple[Optional[str], Optional[str]]]:
         """Fetches full article text for a batch of URLs (used to build a
         real 400-500 word summary instead of a short search excerpt). Never
         raises; URLs that fail are logged for the end-of-run retry pass and
-        come back as None so the caller can fall back to the short excerpt."""
-        result_map: dict[str, Optional[str]] = {u: None for u in urls}
+        come back as (None, None) so the caller can fall back to the short
+        excerpt. Each value is (full_content, title) -- the extracted
+        page's own title is often more accurate than the search excerpt's
+        and is used to catch a homepage/listing page the initial check
+        missed (see is_generic_page re-check in enrich_with_full_summaries)."""
+        result_map: dict[str, tuple[Optional[str], Optional[str]]] = {u: (None, None) for u in urls}
         last_error = "unknown error"
         with self._sem:
             for attempt in range(self.max_retries + 1):
@@ -138,7 +142,7 @@ class ParallelClient:
                         get = (lambda k, default=None: getattr(r, k, default)) if not isinstance(r, dict) else r.get
                         url = get("url")
                         if url:
-                            result_map[url] = get("full_content")
+                            result_map[url] = (get("full_content"), get("title"))
                     return result_map
                 except Exception as exc:  # noqa: BLE001
                     last_error = str(exc)

@@ -62,12 +62,14 @@ class Settings:
     output_dir: Path = PROJECT_ROOT / "output"
     checkpoint_dir: Path = PROJECT_ROOT / ".state"
 
-    # A real test run of the (then 2-call-per-company) design completed a
-    # near-full 280-company list in ~134 seconds -- far under the ~45-60
-    # minute target, with plenty of headroom even after adding a 3rd lane
-    # (see query_builder) and richer settings below for better recall.
-    # Lower this if your Parallel.ai plan's rate limit triggers 429s.
-    max_concurrent_requests: int = int(os.getenv("MAX_CONCURRENT_REQUESTS", "10"))
+    # query_builder now issues ~1 call per (company, geography) pair --
+    # ~84 calls/company, ~23,500 total for a 280-company/82-geography list
+    # -- a deliberate choice to prioritize catching every article over
+    # runtime (see README). With that many calls, concurrency is the main
+    # lever on total time: raising this is the fastest way to speed a run
+    # up, as long as your Parallel.ai plan's rate limit tolerates it (watch
+    # the Run Log's "Failed queries" count for 429s if you raise it).
+    max_concurrent_requests: int = int(os.getenv("MAX_CONCURRENT_REQUESTS", "15"))
     max_retries: int = int(os.getenv("MAX_RETRIES", "4"))
     backoff_base_seconds: float = float(os.getenv("BACKOFF_BASE_SECONDS", "2"))
 
@@ -76,14 +78,13 @@ class Settings:
     )
 
     # One of: turbo, fast, basic, advanced (increasing thoroughness/latency).
-    # Given the time-budget headroom above, "advanced" is now the default
-    # for better recall; drop to "basic" if a run ever gets too slow.
-    parallel_mode: str = os.getenv("PARALLEL_MODE", "advanced")
-    # Raised from 10: real runs kept missing small/regional sources that a
-    # bigger, more prominent result likely crowded out of a shorter top-N
-    # list -- more candidates per query gives long-tail local coverage more
-    # of a chance to surface at all.
-    max_results_per_query: int = int(os.getenv("MAX_RESULTS_PER_QUERY", "20"))
+    # Back to "basic": now that per-geography call COUNT is the main recall
+    # lever (not a few broad, deep calls), per-call depth matters less and
+    # per-call speed matters more for keeping a ~23,500-call run's total
+    # time manageable. Try "advanced" only if basic's recall still feels
+    # thin after the geography breadth change.
+    parallel_mode: str = os.getenv("PARALLEL_MODE", "basic")
+    max_results_per_query: int = int(os.getenv("MAX_RESULTS_PER_QUERY", "10"))
 
     def __post_init__(self):
         self.output_dir.mkdir(parents=True, exist_ok=True)

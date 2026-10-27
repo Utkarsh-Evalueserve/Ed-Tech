@@ -95,17 +95,22 @@ End date   [Enter = now]:       2026-09-30
 Press Enter on both (leave them blank) to default to the last 24 hours --
 this is what you'd normally use for the daily run.
 
-A progress bar will show companies being processed. Each company runs 3
-focused searches (its own newsroom/press-wire coverage, a broader
-local/regional search, and an events/partnerships/awards search added after
-reviewing real missed-article feedback); after irrelevant results and
-duplicates are removed, there's one more pass that fetches the full text of
-each surviving article to build its 400-500 word summary. A full run across
-all 280 companies is still expected to be well **under an hour** for a
-1-day window (a real test of the earlier 2-search design completed in about
-2 minutes, so there's a lot of headroom even with the added 3rd search and
-richer settings). Lower `PARALLEL_MODE` to `basic` or `MAX_RESULTS_PER_QUERY`
-in `.env` if a run ever gets too slow for your Parallel.ai plan.
+A progress bar will show companies being processed. **This run is
+deliberately thorough, not fast**: each company gets its own newsroom/press-
+wire search, a broad international search, and a dedicated search for
+*each* tracked geography (so a company's local activity in any one of the
+82 countries gets a real chance to surface, rather than competing for
+attention in one shared search across all of them). For the full 280-
+company, 82-geography list, that's roughly 23,500 searches, plus a further
+pass that fetches the full text of every surviving article to build its
+summary. Expect a full run to take **on the order of 1-3 hours**, depending
+on your Parallel.ai plan's rate limit -- this was a deliberate trade:
+catching every article was prioritized over runtime, after earlier,
+faster designs kept missing genuine local/regional news. Raising
+`MAX_CONCURRENT_REQUESTS` in `.env` (if your plan's rate limit allows it)
+is the most effective way to speed this up without losing coverage; switch
+`PARALLEL_MODE` to `advanced` only if recall still feels thin after this
+change, since it adds latency per call rather than more calls.
 
 ### If it gets interrupted
 Just run `python edtech_news_tracker.py` again with the **same date range**.
@@ -147,13 +152,14 @@ automatically if you want it fully hands-off.
 The code is split into small, single-purpose modules under `tracker/`:
 - `config.py` -- settings, API key loading, category list.
 - `excel_loader.py` -- reads and validates `edtech_tracking_list.xlsx`.
-- `query_builder.py` -- builds 3 focused searches per company: its own
-  newsroom/press-wire coverage, a broader local/regional search that lets
-  Parallel's multilingual index surface local-language coverage (geography
-  is attributed afterward by matching the tracked country names, rather
-  than issuing a separate call per country), and an events/partnerships/
-  awards search targeting the smaller local stories a generic company-news
-  query tends to miss in favor of big funding/M&A headlines.
+- `query_builder.py` -- builds, per company: its own newsroom/press-wire
+  search, a broad international search (catches a story picked up or
+  translated by a foreign outlet), and one dedicated search *per tracked
+  geography* -- the real fix for local/regional recall, after a shared,
+  all-countries-in-one-call design kept missing local partnerships,
+  conferences and awards covered only by a country's own press. A
+  company's `Notes` (disambiguation guidance) are appended to every
+  search's instructions.
 - `parallel_client.py` -- talks to the Parallel.ai Search and Extract APIs,
   with retry/backoff and a concurrency limit; failed queries are logged and
   retried once more at the end of the run. A failed full-text extraction is

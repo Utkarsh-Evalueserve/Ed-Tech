@@ -228,7 +228,10 @@ def _raw_result_to_article(
 
     review_flag = "; ".join(review_reasons) if review_reasons else "OK"
 
-    geography_name = detect_geography(combined_text, geographies)
+    # A task scoped to a specific geography (the per-country lane) already
+    # knows its country with certainty -- prefer that over inferring one by
+    # scanning the text, which is only needed for the global-scope lanes.
+    geography_name = task.geography.country if task.geography else detect_geography(combined_text, geographies)
 
     return Article(
         company=task.company.name,
@@ -310,7 +313,7 @@ def enrich_with_full_summaries(
     to_drop: set[int] = set()
     batch_size = 20
     batches = [urls[i : i + batch_size] for i in range(0, len(urls), batch_size)]
-    content_map: dict[str, str | None] = {}
+    content_map: dict[str, tuple[str | None, str | None]] = {}
 
     with ThreadPoolExecutor(max_workers=settings.max_concurrent_requests) as pool:
         futures = [pool.submit(client.extract, batch) for batch in batches]
@@ -323,14 +326,14 @@ def enrich_with_full_summaries(
     # accepting the batch's partial failure as final. This directly targets
     # the "Incomplete Title and Summary" feedback, which traced back to
     # extraction failing and leaving only a bare, near-empty fallback.
-    failed_urls = [u for u, c in content_map.items() if not c or not c.strip()]
+    failed_urls = [u for u, (c, _) in content_map.items() if not c or not c.strip()]
     if failed_urls:
         with ThreadPoolExecutor(max_workers=settings.max_concurrent_requests) as pool:
             futures = {pool.submit(client.extract, [u]): u for u in failed_urls}
             for fut in tqdm(as_completed(futures), total=len(futures), desc="Retrying failed extractions", unit="url"):
                 content_map.update(fut.result())
 
-    for url, full_content in content_map.items():
+    for url, (full_content, extracted_title) in content_map.items():
         for art in url_to_articles.get(url, []):
             # A date decoded straight from the URL (e.g. BusinessWire's
             # YYYYMMDD path) is checked even when extraction failed --
@@ -338,6 +341,14 @@ def enrich_with_full_summaries(
             # that this is worth doing independently of full-text content.
             url_date = _date_from_url(url)
             if url_date is not None and not (start_dt <= url_date <= end_dt):
+                to_drop.add(id(art))
+                continue
+
+            # The page's OWN title (from full extraction) is often more
+            # accurate than the short search excerpt's -- re-checking catches
+            # a homepage/section-front/listing page the initial check missed
+            # (reported in practice as "source link goes to a homepage").
+            if extracted_title and is_generic_page(url, extracted_title, art.source_name):
                 to_drop.add(id(art))
                 continue
 
@@ -379,7 +390,7 @@ def enrich_with_full_summaries(
             )
 
     if to_drop:
-        print(f"  Dropped {len(to_drop)} article(s) that turned out to be stale or not actually about the company.")
+        print(f"  Dropped {len(to_drop)} article(s) after full-text review (stale date, a homepage/listing page, or not actually about the company).")
     return [a for a in articles if id(a) not in to_drop]
 
 

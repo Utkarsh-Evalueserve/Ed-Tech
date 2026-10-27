@@ -155,9 +155,11 @@ def summarize(
         word_count += wc
 
     ordered = [s for idx, s, _, _ in scored if idx in selected]
-    summary = " ".join(ordered)
 
-    words = summary.split()
-    if len(words) > max_words:
-        summary = " ".join(words[:max_words]) + "..."
-    return summary
+    # Trim from the end by whole sentences, never mid-sentence -- cutting a
+    # sentence off partway (the old "..." word-count truncation) read as an
+    # incomplete, lower-quality summary even when the content itself was fine.
+    while ordered and sum(len(s.split()) for s in ordered) > max_words:
+        ordered.pop()
+
+    return " ".join(ordered)

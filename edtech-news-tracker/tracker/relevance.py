@@ -19,7 +19,7 @@ _EXCLUDE_RE = re.compile("|".join(EXCLUDE_PATTERNS), re.IGNORECASE)
 
 _CATEGORY_KEYWORDS = {
     "Executive & Leadership Changes": ["ceo", "cfo", "coo", "appoint", "steps down", "resign", "named president", "new chief", "hires", "promoted"],
-    "Strategic Moves (M&A, Partnerships, Investments, Funding)": ["acquisition", "acquire", "merger", "partnership", "invest", "funding", "raises", "series a", "series b", "series c", "stake", "collaborat", "mou", "memorandum of understanding", "signs agreement", "pilot program"],
+    "Strategic Moves (M&A, Partnerships, Investments, Funding)": ["acquisition", "acquire", "merger", "partner", "invest", "funding", "raises", "series a", "series b", "series c", "stake", "collaborat", "mou", "memorandum of understanding", "signs agreement", "pilot program"],
     "Office Openings/Expansions": ["opens office", "expansion", "new office", "expands to", "opens new"],
     "New Products/Launches": ["launch", "unveils", "introduces", "new product", "rolls out", "release of"],
     "Marketing Campaigns": ["campaign", "marketing", "brand partnership", "sponsorship", "conference", "summit", "seminar", "conclave", "workshop", "keynote"],

@@ -1,30 +1,32 @@
 """
 Builds Parallel.ai search requests for a company.
 
-Three query "lanes" per company (down from the original per-geography
-design, which issued ~84 calls/company and took ~5 hours for a 280-company
-list; real test runs showed the 2-lane version completing in ~2 minutes,
-so a 3rd lane was added back in for recall -- see below -- while staying
-far under the ~45-60 minute target):
-  1. Official/press lane -- the company's own newsroom/press/blog/investor
-     pages, plus major press-release wires (PR Newswire, Business Wire,
-     GlobeNewswire, Cision, Accesswire). English, global.
-  2. Local & regional lane -- one broad, company-specific search that lets
-     Parallel's own multilingual web index surface local-language coverage
-     from the geographies tracked in the Excel file, instead of issuing a
-     separate API call per country. The geography is attributed after the
-     fact (see relevance.detect_geography) rather than forced query-by-query.
-  3. Events & partnerships lane -- added after reviewing real feedback: most
-     of a sample of real missed articles were local event/conference
-     appearances, accreditations, awards and small local partnerships --
-     content a generic "company + news" query under-indexes for relative to
-     big-ticket funding/M&A news. This lane targets that specifically.
+Query design (updated after real runs kept missing genuine local/regional
+articles -- German, Korean, Ukrainian, Mexican, Romanian, Cambodian,
+Turkish, Brazilian and Qatari outlets covering a company's local activity,
+none of which a handful of broad, shared-across-82-countries searches could
+reliably surface):
 
-This keeps total calls at ~3 per company (vs. ~1 + 82 before), which is what
-actually drives both runtime and false-positive volume down: a handful of
-precise, company-specific searches beats dozens of broad ones.
+  1. Official/press lane (1 call/company) -- the company's own newsroom/
+     press/blog/investor pages, major press-release wires, AND a partner
+     organization's own newsroom when the announcement is about a deal
+     involving this company. English, global.
+  2. Global/broad lane (1 call/company) -- catches internationally-picked-
+     up or syndicated stories not tied to one specific tracked country
+     (e.g. a US lawsuit reported by a German financial site).
+  3. Per-geography lane (1 call per company PER tracked geography) -- the
+     real fix for local/regional recall: a dedicated, country-specific
+     search (local institutions, local partnerships, conferences, awards,
+     accreditation) rather than one shared call across all 82 countries.
 
-Brand names/aliases are always kept as-is (never translated).
+For a 280-company, 82-geography list this is ~280 x 84 = ~23,500 calls --
+deliberately comprehensive rather than fast, per an explicit decision to
+prioritize catching every article over runtime (see README for the time/
+cost tradeoff and the knobs to dial it back down if needed).
+
+Brand names/aliases are always kept as-is (never translated). Any
+company-specific disambiguation guidance (the Notes column) is appended to
+every objective below -- see _notes_clause.
 """
 from __future__ import annotations
 
@@ -38,9 +40,10 @@ from .excel_loader import Company, Geography
 @dataclass
 class SearchTask:
     company: Company
-    lane: str  # "official_press" | "local_regional"
+    lane: str  # "official_press" | "global_broad" | "geography"
     objective: str
     search_queries: List[str]
+    geography: Geography | None = None
 
 
 def _alias_clause(company: Company) -> str:
@@ -99,7 +102,8 @@ def build_official_press_task(company: Company, start_date: str, end_date: str) 
         f"announcement is specifically about a deal/partnership/program involving {company.name} "
         f"(e.g. the other party in a partnership posting the release on their own site rather than "
         f"{company.name}'s) -- do not require {company.name} to be the one hosting it. "
-        f"Topics of interest: {', '.join(CATEGORIES)}. "
+        f"Return the specific article/press-release URL, never a homepage, section front, author "
+        f"index, or topic-tag listing page. Topics of interest: {', '.join(CATEGORIES)}. "
         f"Exclude: generic company profile/about/overview pages, directory listings, and routine "
         f"stock price or analyst rating commentary. {_date_window_clause(start_date, end_date)}"
         f"{_notes_clause(company)}"
@@ -113,63 +117,66 @@ def build_official_press_task(company: Company, start_date: str, end_date: str) 
     return SearchTask(company, "official_press", objective, queries)
 
 
-def build_local_regional_task(
-    company: Company, geographies: List[Geography], start_date: str, end_date: str
-) -> SearchTask:
-    countries = ", ".join(g.country for g in geographies) if geographies else "any country"
+def build_global_broad_task(company: Company, start_date: str, end_date: str) -> SearchTask:
     aliases_txt = ", ".join(company.aliases) if company.aliases else "no aliases"
 
     objective = (
-        f"Find local or regional news coverage, in any local language, that is "
-        f"SPECIFICALLY ABOUT the education/ed-tech company '{company.name}' (also known as: "
-        f"{aliases_txt}) -- for example a local office opening, a market entry, a partnership "
-        f"with a local institution, a regulatory action, or local press coverage of the company. "
-        f"Only consider articles where this company is the actual subject of the story, not "
-        f"pages that just mention its name alongside many others. Restrict to these tracked "
-        f"countries: {countries}. Topics of interest: {', '.join(CATEGORIES)}. "
-        f"Exclude: generic company profile/directory pages and routine stock/analyst commentary. "
-        f"{_date_window_clause(start_date, end_date)}{_notes_clause(company)}"
+        f"Find any news coverage, from any country or source, that is SPECIFICALLY ABOUT the "
+        f"education/ed-tech company '{company.name}' (also known as: {aliases_txt}) -- including "
+        f"a story that originated elsewhere but was picked up, translated, or syndicated by an "
+        f"international or non-English outlet (e.g. a US lawsuit reported by a German financial "
+        f"site, or a product update covered by a regional tech blog). Only count articles where "
+        f"this company is the actual subject, not a passing mention. Return the specific article "
+        f"URL, never a homepage, section front, or topic-tag listing page. Topics of interest: "
+        f"{', '.join(CATEGORIES)}. Exclude: generic company profile/directory pages and routine "
+        f"stock/analyst commentary. {_date_window_clause(start_date, end_date)}{_notes_clause(company)}"
     )
     queries = [
         f'"{company.name}" news',
-        f"{_alias_clause(company)} partnership OR funding OR launch OR regulation OR award",
-        f"{company.name} local office OR market entry OR local partnership",
-        f"{company.name} signs OR appoints OR announces OR organizes",
+        f"{_alias_clause(company)} lawsuit OR controversy OR complaint OR investigation",
+        f"{company.name} launches OR unveils OR announces",
+        f"{company.name} signs OR appoints OR partners",
     ]
-    return SearchTask(company, "local_regional", objective, queries)
+    return SearchTask(company, "global_broad", objective, queries)
 
 
-def build_events_partnerships_task(
-    company: Company, geographies: List[Geography], start_date: str, end_date: str
+def build_geography_task(
+    company: Company, geography: Geography, start_date: str, end_date: str
 ) -> SearchTask:
-    countries = ", ".join(g.country for g in geographies) if geographies else "any country"
     aliases_txt = ", ".join(company.aliases) if company.aliases else "no aliases"
+    languages = ", ".join(geography.languages) if geography.languages else "the local language"
+    source_hint = ""
+    if geography.local_sources:
+        source_hint = " Prioritize these known local sources if relevant: " + ", ".join(geography.local_sources) + "."
 
     objective = (
-        f"Find news about the education/ed-tech company '{company.name}' (also known as: "
-        f"{aliases_txt}) attending or hosting a conference/summit/seminar, signing a cooperation "
-        f"or accreditation agreement with a school/university/ministry, receiving an industry "
-        f"award or analyst recognition, or announcing a smaller local collaboration -- the kind "
-        f"of local/regional coverage that a generic company-news search tends to miss in favor of "
-        f"big funding/M&A headlines. Restrict to these tracked countries: {countries}. Only count "
-        f"articles where {company.name} is the actual subject, not a passing mention. Exclude "
-        f"generic company profile/directory pages and routine stock/analyst commentary. "
+        f"Find news published in {geography.country}, in {languages} or in English, that is "
+        f"SPECIFICALLY ABOUT the education/ed-tech company '{company.name}' (also known as: "
+        f"{aliases_txt}) -- for example a local partnership with a school/university/ministry, a "
+        f"conference or event appearance, an accreditation or cooperation agreement, a local "
+        f"office opening or market entry, an award, a local product launch, or local press "
+        f"coverage of the company's activities. Only count articles where this company is the "
+        f"actual subject of the story, not a passing mention alongside many others. Return the "
+        f"specific article URL, never a homepage, section front, or topic-tag listing page."
+        f"{source_hint} Topics of interest: {', '.join(CATEGORIES)}. Exclude: generic company "
+        f"profile/directory pages and routine stock/analyst commentary. "
         f"{_date_window_clause(start_date, end_date)}{_notes_clause(company)}"
     )
     queries = [
-        f"{company.name} conference OR summit OR seminar OR conclave",
-        f"{_alias_clause(company)} cooperation agreement OR accreditation OR MOU",
-        f"{company.name} award OR recognized OR named",
-        f"{company.name} campaign OR scholarship OR exam results OR workshop",
+        f'"{company.name}" {geography.country}',
+        f"{_alias_clause(company)} partnership OR MOU OR agreement {geography.country}",
+        f"{company.name} conference OR event OR award {geography.country}",
     ]
-    return SearchTask(company, "events_partnerships", objective, queries)
+    return SearchTask(company, "geography", objective, queries, geography=geography)
 
 
 def build_tasks_for_company(
     company: Company, geographies: List[Geography], start_date: str, end_date: str
 ) -> List[SearchTask]:
-    return [
+    tasks = [
         build_official_press_task(company, start_date, end_date),
-        build_local_regional_task(company, geographies, start_date, end_date),
-        build_events_partnerships_task(company, geographies, start_date, end_date),
+        build_global_broad_task(company, start_date, end_date),
     ]
+    for geo in geographies:
+        tasks.append(build_geography_task(company, geo, start_date, end_date))
+    return tasks
